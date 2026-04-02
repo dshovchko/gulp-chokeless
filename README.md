@@ -66,7 +66,9 @@ In your main configuration, instantiate the tool *outside* the task function so 
 // gulpfile.js
 import gulp from 'gulp';
 import path from 'path';
-import gulpChokelessPool from './dist/index.js'; // Adjust import
+import gulpChokelessPool from 'gulp-chokeless';
+
+const __dirname = import.meta.dirname;
 
 // 1. Initialize the thread pool
 const lessCompiler = new gulpChokelessPool({
@@ -83,7 +85,7 @@ const lessCompiler = new gulpChokelessPool({
 export function buildStyles() {
   return gulp.src('src/styles/**/*.less', { sourcemaps: true })
     // Pipe all streams into the thread pool
-    .pipe(lessCompiler)
+    .pipe(lessCompiler())
     .on('error', function(err) {
       console.error('Task failed:', err.message);
       this.emit('end'); // Prevents gulp watch from crashing!
@@ -101,7 +103,7 @@ When initializing `new gulpChokelessPool(options)`, you can pass:
 | `workerPath` | `string` | **required** | Absolute path to the worker file. |
 | `concurrency`| `number` | `CPUs * 0.75` | Maximum number of concurrent worker threads to spawn. |
 | `workerOptions`| `object` | `{}` | An object containing configs grouped by tool (passed directly to the worker). |
-| `noCrash` | `boolean` | `false` | If true, prevents the orchestrator from throwing fatal unhandled rejections during stream processing, gracefully passing them down the stream as error events. |
+| `noCrash` | `boolean` | `false` | If true, attempts to prevent fatal unhandled rejections from crashing the process during stream processing. Worker errors are not emitted as stream `error` events and may result in the affected file being dropped instead. |
 
 > **Note on `concurrency`:** You can specify more workers than your machine has CPU cores—nothing will break and the pipeline will still execute successfully. However, doing so will likely slow down your task due to the extra processing overhead of managing those extra workers and context switching. By default, the auto mode dynamically sets concurrency to 75% of your available logical cores (but never less than 1).
 
