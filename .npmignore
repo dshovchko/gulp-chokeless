@@ -1,0 +1,10 @@
+src/
+test/
+example/
+.gitignore
+.eslintrc.json
+eslint.config.mjs
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+coverage/
