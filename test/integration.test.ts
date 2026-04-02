@@ -36,8 +36,8 @@ const runStream = (stream: any, files: MockFile[]): Promise<MockFile[]> => {
 };
 
 describe('Integration with Worker Threads', () => {
-  const dummyWorkerPath = path.resolve(__dirname, 'dummy-worker.js');
-  const errorWorkerPath = path.resolve(__dirname, 'dummy-error-worker.js');
+  const dummyWorkerPath = path.resolve(import.meta.dirname, 'dummy-worker.js');
+  const errorWorkerPath = path.resolve(import.meta.dirname, 'dummy-error-worker.js');
 
   it('1. Fail fast on missing workerPath (without waiting for stream)', () => {
     expect(() => createGulpWorkerPool({})).toThrow('workerPath is required');
