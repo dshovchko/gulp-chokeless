@@ -1,11 +1,15 @@
 import {parentPort} from 'worker_threads';
+import {pathToFileURL} from 'url';
 
 let currentHandler: any = null;
 let initPromise: Promise<any> | null = null;
 let lastWorkerPath: string | null = null;
 
 async function getHandler(processorPath: string): Promise<any> {
-  const mod = await import(processorPath);
+  const moduleSpecifier = processorPath.startsWith('file://')
+    ? processorPath
+    : pathToFileURL(processorPath).href;
+  const mod = await import(moduleSpecifier);
   return mod.default || mod;
 }
 
@@ -30,7 +34,7 @@ function handleInitMessage(message: any): void {
     })();
   } else if (initPromise && opts.workerPath === lastWorkerPath) {
     // Already loaded module, but we should call the user's init() again to clear caches for watch mode
-    initPromise.then(async () => {
+    initPromise = initPromise.then(async () => {
       try {
         if (typeof currentHandler.init === 'function') {
           const initResult = await currentHandler.init(opts.workerOptions || {});
@@ -41,6 +45,7 @@ function handleInitMessage(message: any): void {
       } catch (err: any) {
         parentPort!.postMessage({type: 'init_done', error: err.message});
         console.error('Worker re-init error:', err);
+        throw err; // Ensure subsequent tasks fail if re-init fails
       }
     });
   } else {
