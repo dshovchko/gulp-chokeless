@@ -31,7 +31,10 @@ function handleInitMessage(message: any): void {
         lastWorkerPath = null;
         // eslint-disable-next-line require-atomic-updates
         currentHandler = null;
-        parentPort!.postMessage({type: 'init_done', error: err.message});
+        parentPort!.postMessage({
+          type: 'init_done',
+          error: err?.stack ?? err?.message ?? String(err),
+        });
         throw err;
       }
     })();
@@ -46,7 +49,10 @@ function handleInitMessage(message: any): void {
           parentPort!.postMessage({type: 'init_done'});
         }
       } catch (err: any) {
-        parentPort!.postMessage({type: 'init_done', error: err.message});
+        parentPort!.postMessage({
+          type: 'init_done',
+          error: err?.stack ?? err?.message ?? String(err),
+        });
         throw err; // Ensure subsequent tasks fail if re-init fails
       }
     });
