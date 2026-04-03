@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ConcurrentTransform } from '../src/concurrent-transform.js';
+import { ConcurrentTransform } from '../src/concurrent-transform';
 
 describe('ConcurrentTransform', () => {
   beforeEach(() => {

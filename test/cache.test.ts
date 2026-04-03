@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import createPool from '../dist/index';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 describe('Worker cache validation via init()', () => {
   it('Should reset cache value based on init() per-stream logic', async () => {
     // IMPORTANT: use dist so module path resolves properly
-    const pool = createPool({ workerPath: path.resolve(__dirname, 'dummy-cache-worker.js'), concurrency: 1 });
+    const dirname = fileURLToPath(new URL('.', import.meta.url));
+    const pool = createPool({ workerPath: path.resolve(dirname, 'dummy-cache-worker.js'), concurrency: 1 });
 
     // Fake a gulp file buffer handler
     const run = (stream) => new Promise(res => {
