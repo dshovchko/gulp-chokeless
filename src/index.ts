@@ -12,6 +12,9 @@ interface WorkerInfo {
   callbacks: Map<number, TaskCallback>;
 }
 
+/**
+ * Custom error class to wrap exceptions originating from background workers inside the pool.
+ */
 class GulpWorkerError extends Error {
   plugin: string;
   constructor(message: string | Error) {
@@ -24,6 +27,10 @@ class GulpWorkerError extends Error {
   }
 }
 
+/**
+ * Represents a reusable pool of Node.js worker threads dedicated to evaluating
+ * Gulp stream buffers asynchronously on background processors.
+ */
 export class GulpChokelessPool {
   private workers: WorkerInfo[] = [];
   private taskQueue = new FastQueue<any>();
@@ -236,6 +243,11 @@ export class GulpChokelessPool {
   }
 }
 
+/**
+ * Bootstraps a scalable task pool bound to a specific worker execution script.
+ * @param baseOptions - Needs an absolute `workerPath` and optional `concurrency`.
+ * @returns A factory function that evaluates parallel jobs against Gulp pipeline buffers without blocking the Node.js event loop.
+ */
 function createGulpWorkerPool(baseOptions: any = {}): (streamOptions?: any) => ConcurrentTransform {
   const pool = new GulpChokelessPool(baseOptions);
   return pool.getPlugin();

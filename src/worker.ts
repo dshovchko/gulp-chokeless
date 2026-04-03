@@ -5,6 +5,11 @@ let currentHandler: any = null;
 let initPromise: Promise<any> | null = null;
 let lastWorkerPath: string | null = null;
 
+/**
+ * Loads a specified user-provided processor module dynamically.
+ * @param processorPath - The absolute path or file URL of the custom worker execution script.
+ * @returns The resolved, executable module handler.
+ */
 async function getHandler(processorPath: string): Promise<any> {
   const moduleSpecifier = processorPath.startsWith('file://')
     ? processorPath
@@ -13,6 +18,11 @@ async function getHandler(processorPath: string): Promise<any> {
   return mod.default || mod;
 }
 
+/**
+ * Re-reads worker options, invokes user-defined initializations or cache warm-ups,
+ * and delegates success/failure directly to the parent stream orchestrator via port messaging.
+ * @param message - Initialization payload dispatched from the `GulpChokelessPool`.
+ */
 function handleInitMessage(message: any): void {
   const opts = message.options || {};
 
