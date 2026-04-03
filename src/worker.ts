@@ -83,7 +83,17 @@ async function handleTaskMessage(message: any): Promise<void> {
   const {sab, filename, sourceMap, options, id} = message;
 
   if (initPromise) {
-    await initPromise;
+    try {
+      await initPromise;
+    } catch (err: any) {
+      return parentPort!.postMessage({
+        error: {
+          message: `Worker initialization failed: ${err.message || err.toString()}`,
+          filename
+        },
+        id
+      });
+    }
   }
 
   const view = new Uint8Array(sab);
@@ -118,7 +128,17 @@ if (parentPort) {
     } else {
       // Intentionally not awaiting here to allow asynchronous tasks
       // (like lightningcss) to safely execute concurrently within the worker
-      handleTaskMessage(message);
+      handleTaskMessage(message).catch((err: any) => {
+        parentPort!.postMessage({
+          error: {
+            message: err?.message || err?.toString?.() || 'Unknown worker error',
+            line: err?.line,
+            filename: err?.filename || message?.filename,
+            extract: err?.extract
+          },
+          id: message?.id
+        });
+      });
     }
   });
 }
