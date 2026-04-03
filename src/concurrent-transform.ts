@@ -50,7 +50,8 @@ export class ConcurrentTransform extends Transform {
       highWaterMark: options.highWaterMark ?? 16
     });
 
-    this.concurrency = options.concurrency ?? 1;
+    // Guard against deadlocks: concurrency <= 0 or NaN will hang the stream
+    this.concurrency = Math.max(1, options.concurrency || 1);
     this.performTask = performTask;
     this.flushCallback = flushCallback;
   }

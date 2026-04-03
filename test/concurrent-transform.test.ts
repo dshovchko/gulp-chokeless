@@ -50,6 +50,30 @@ describe('ConcurrentTransform', () => {
     expect(transform.writableHighWaterMark).toBe(0);
   });
 
+  it('should coerce concurrency <= 0 or NaN to 1 to prevent deadlocks', () => {
+    return new Promise<void>((resolve, reject) => {
+      const transform = new ConcurrentTransform(
+        { concurrency: 0, objectMode: true },
+        (chunk, enc, cb) => cb(null, chunk)
+      );
+
+      let processed = 0;
+      transform.on('data', () => processed++);
+      transform.on('end', () => {
+        try {
+          expect(processed).toBe(1);
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      });
+      transform.on('error', reject);
+
+      transform.write('test');
+      transform.end();
+    });
+  });
+
   it('should correctly respect the concurrency limit', () => {
     return new Promise<void>((resolve, reject) => {
       let activeTasks = 0;
