@@ -39,7 +39,9 @@ The worker must export an async `process` function. This is where your heavy lif
 import less from 'less';
 
 export async function init() {
-  // Optional: Run once when the worker thread starts (warm-up, cache clearing)
+  // Optional: May run when the worker starts and again at the beginning of each stream
+  // (for example in watch mode or after cache resets), so keep this limited to light
+  // warm-up/reset work rather than expensive one-time setup.
   return 'Worker is ready!';
 }
 
@@ -71,7 +73,7 @@ import gulpChokelessPool from 'gulp-chokeless';
 const __dirname = import.meta.dirname;
 
 // 1. Initialize the thread pool
-const lessCompiler = new gulpChokelessPool({
+const lessCompiler = gulpChokelessPool({
   workerPath: path.resolve(__dirname, './worker.js'),
   concurrency: 4, // Optional: defaults to ~75% of your CPU cores
   workerOptions: {
@@ -96,7 +98,7 @@ export function buildStyles() {
 
 ## Options
 
-When initializing `new gulpChokelessPool(options)`, you can pass:
+When initializing `gulpChokelessPool(options)`, you can pass:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
