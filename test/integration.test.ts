@@ -38,6 +38,7 @@ const runStream = (stream: any, files: MockFile[]): Promise<MockFile[]> => {
 describe('Integration with Worker Threads', () => {
   const dummyWorkerPath = path.resolve(import.meta.dirname, 'dummy-worker.js');
   const errorWorkerPath = path.resolve(import.meta.dirname, 'dummy-error-worker.js');
+  const fatalWorkerPath = path.resolve(import.meta.dirname, 'dummy-fatal-crash-worker.js');
 
   it('1. Fail fast on missing workerPath (without waiting for stream)', () => {
     expect(() => createGulpWorkerPool({})).toThrow('workerPath is required');
@@ -105,23 +106,41 @@ describe('Integration with Worker Threads', () => {
     });
   });
 
-  it('5. Handles worker crash/error gracefully without killing the whole suite (when noCrash=true)', async () => {
-    // Suppress console.error so it doesn't pollute vitest runner output
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
+  it('5. Emits an error to the stream instead of crashing the process on worker errors', async () => {
     const pool = createGulpWorkerPool({ workerPath: errorWorkerPath, concurrency: 1 });
-    const stream = pool({ noCrash: true });
+    const stream = pool();
 
     const files = [new MockFile({ contents: Buffer.from('BAD_CODE'), path: '/crash.less' })];
 
-    // with noCrash it calls cb() essentially swallowing the broken file but saving the plugin
-    const out = await runStream(stream, files);
-    expect(out).toHaveLength(0); // The file was completely bypassed and dropped due to error processing
+    try {
+      await runStream(stream, files);
+      expect.unreachable('Should have thrown an error');
+    } catch (e: any) {
+      expect(e).toBeDefined();
+      expect(e.plugin).toBe('gulp-chokeless');
+      expect(e.message).toContain('Simulated worker crash');
+    }
+  });
 
-    expect(consoleSpy).toHaveBeenCalled();
-    expect(consoleSpy.mock.calls[0][0]).toContain('Simulated worker crash');
+  it('6. Replaces fatally crashed workers automatically so future streams do not hang', async () => {
+    const pool = createGulpWorkerPool({ workerPath: fatalWorkerPath, concurrency: 1 });
 
-    // Clean up the spy
-    consoleSpy.mockRestore();
+    const stream1 = pool();
+    const files1 = [new MockFile({ contents: Buffer.from('CRASH'), path: '/crash.less' })];
+
+    try {
+      await runStream(stream1, files1);
+      expect.unreachable('Should have thrown an error');
+    } catch (e: any) {
+      expect(e.message).toContain('Worker stopped with exit code 1');
+    }
+
+    // Now test if the pool successfully replaced the dead worker
+    const stream2 = pool();
+    const files2 = [new MockFile({ contents: Buffer.from('hello'), path: '/ok.less' })];
+
+    const out = await runStream(stream2, files2);
+    expect(out).toHaveLength(1);
+    expect(out[0].contents?.toString()).toBe('hello-OK');
   });
 });

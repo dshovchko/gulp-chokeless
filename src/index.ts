@@ -66,15 +66,7 @@ export class GulpChokelessPool {
 
   private handleTaskError(err: any, file: any, currentOptions: any, cb: any): void {
     err.message = err.message + ' in file ' + (err.filename || file.path);
-    console.error(`\n \x1b[31m(!) ERROR: ${err.message}\x1b[0m\n`);
-    if (err.extract) {
-      console.error(`\x1b[33m${Array.isArray(err.extract) ? err.extract.join('\n') : err.extract}\x1b[0m\n`);
-    }
-    if (currentOptions.noCrash) {
-      cb();
-    } else {
-      process.exit(1); // Standard CI crash
-    }
+    cb(new GulpWorkerError(err));
   }
 
   private createWorker(): WorkerInfo {
@@ -89,7 +81,7 @@ export class GulpChokelessPool {
 
     worker.on('message', (data: any) => {
       if (data.type === 'init_done') {
-        // initialization handshake
+        if (data.error) throw new GulpWorkerError(`Worker initialization failed: ${data.error?.message || data.error}`);
         return;
       }
 
@@ -104,24 +96,31 @@ export class GulpChokelessPool {
     });
 
     worker.on('error', (err: Error) => {
-      for (const [, cb] of workerInfo.callbacks.entries()) {
-        cb(err, null);
-      }
+      for (const [, cb] of workerInfo.callbacks.entries()) cb(err, null);
       workerInfo.callbacks.clear();
-      workerInfo.busy = false;
+      this.replaceDeadWorker(workerInfo);
     });
 
     worker.on('exit', (code) => {
       if (code !== 0) {
-        for (const [, cb] of workerInfo.callbacks.entries()) {
-          cb(new Error(`Worker stopped with exit code ${code}`), null);
-        }
+        for (const [, cb] of workerInfo.callbacks.entries()) cb(new Error(`Worker stopped with exit code ${code}`), null);
         workerInfo.callbacks.clear();
-        workerInfo.busy = false;
+        this.replaceDeadWorker(workerInfo);
       }
     });
 
     return workerInfo;
+  }
+
+  private replaceDeadWorker(deadWorkerInfo: WorkerInfo): void {
+    const idx = this.workers.indexOf(deadWorkerInfo);
+    if (idx !== -1) {
+      const replacement = this.createWorker();
+      this.workers[idx] = replacement;
+      replacement.worker.postMessage({type: 'init', options: this.baseOptions});
+      if (this.activeStreams > 0) replacement.worker.ref();
+      this.processNextTask();
+    }
   }
 
   private processNextTask(): void {
@@ -175,14 +174,13 @@ export class GulpChokelessPool {
     return (streamOptions: any = {}): ConcurrentTransform => {
       const currentOptions = Object.assign({
         workerOptions: {},
-        noCrash: false,
         sourcemap: false
       }, this.baseOptions, streamOptions);
 
       // Lock workerPath to the originally pre-warmed module, ignoring any stream overrides
       currentOptions.workerPath = this.baseOptions.workerPath;
 
-      // Ensure workers receive the most up-to-date options for this stream chunk
+      // Ensure workers reset their caches and receive the latest options per stream (useful for watch mode)
       this.workers.forEach((w) => w.worker.postMessage({type: 'init', options: currentOptions}));
 
       this.activeStreams++;

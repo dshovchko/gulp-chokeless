@@ -29,8 +29,20 @@ function handleInitMessage(message: any): void {
       }
     })();
   } else if (initPromise && opts.workerPath === lastWorkerPath) {
-    // If it's already initialized or initializing, just answer back immediately
-    initPromise.then(() => parentPort!.postMessage({type: 'init_done'}));
+    // Already loaded module, but we should call the user's init() again to clear caches for watch mode
+    initPromise.then(async () => {
+      try {
+        if (typeof currentHandler.init === 'function') {
+          const initResult = await currentHandler.init(opts.workerOptions || {});
+          parentPort!.postMessage({type: 'init_done', result: initResult});
+        } else {
+          parentPort!.postMessage({type: 'init_done'});
+        }
+      } catch (err: any) {
+        parentPort!.postMessage({type: 'init_done', error: err.message});
+        console.error('Worker re-init error:', err);
+      }
+    });
   } else {
     parentPort!.postMessage({type: 'init_done'});
   }

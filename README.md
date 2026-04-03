@@ -103,7 +103,6 @@ When initializing `new gulpChokelessPool(options)`, you can pass:
 | `workerPath` | `string` | **required** | Absolute path to the worker file. |
 | `concurrency`| `number` | `CPUs * 0.75` | Maximum number of concurrent worker threads to spawn. |
 | `workerOptions`| `object` | `{}` | An object containing configs grouped by tool (passed directly to the worker). |
-| `noCrash` | `boolean` | `false` | If true, attempts to prevent fatal unhandled rejections from crashing the process during stream processing. Worker errors are not emitted as stream `error` events and may result in the affected file being dropped instead. |
 
 > **Note on `concurrency`:** You can specify more workers than your machine has CPU cores—nothing will break and the pipeline will still execute successfully. However, doing so will likely slow down your task due to the extra processing overhead of managing those extra workers and context switching. By default, the auto mode dynamically sets concurrency to 75% of your available logical cores (but never less than 1).
 

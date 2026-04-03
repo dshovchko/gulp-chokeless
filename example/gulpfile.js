@@ -2,8 +2,7 @@
 ...
 
 const less = createChokelessTask({
-  workerPath: path.resolve(import.meta.dirname, './worker/less.js'),
-  noCrash: true
+  workerPath: path.resolve(import.meta.dirname, './worker/less.js')
 });
 
 gulp.src(src, {

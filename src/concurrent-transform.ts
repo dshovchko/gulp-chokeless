@@ -15,8 +15,8 @@ export class ConcurrentTransform extends Transform {
   private performTask: PerformTask;
   private flushCallback?: FlushCallback;
   private activeCount = 0;
-  private callbackPending = false;
-  private drainCallback?: TransformCallback;
+  private drainTransformCallback?: TransformCallback;
+  private drainFlushCallback?: () => void;
 
   constructor(
     options: ConcurrentTransformOptions,
@@ -40,7 +40,6 @@ export class ConcurrentTransform extends Transform {
 
   _transform(chunk: any, encoding: string, callback: TransformCallback): void {
     this.activeCount++;
-    this.callbackPending = true;
 
     this.performTask(chunk, encoding, (err?: Error | null, result?: any) => {
       this.activeCount--;
@@ -51,19 +50,23 @@ export class ConcurrentTransform extends Transform {
         this.push(result);
       }
 
-      if (this.drainCallback && this.activeCount === 0) {
-        const drainCb = this.drainCallback;
-        this.drainCallback = undefined;
+      if (this.drainTransformCallback && this.activeCount < this.concurrency) {
+        const drainCb = this.drainTransformCallback;
+        this.drainTransformCallback = undefined;
         drainCb();
+      }
+
+      if (this.drainFlushCallback && this.activeCount === 0) {
+        const flushCb = this.drainFlushCallback;
+        this.drainFlushCallback = undefined;
+        flushCb();
       }
     });
 
     if (this.activeCount < this.concurrency) {
-      this.callbackPending = false;
       callback();
     } else {
-      this.drainCallback = callback;
-      this.callbackPending = false;
+      this.drainTransformCallback = callback;
     }
   }
 
@@ -77,7 +80,7 @@ export class ConcurrentTransform extends Transform {
     };
 
     if (this.activeCount > 0) {
-      this.drainCallback = doFlush;
+      this.drainFlushCallback = doFlush;
     } else {
       doFlush();
     }
