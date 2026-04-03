@@ -128,9 +128,10 @@ export class GulpChokelessPool {
   }
 
   private processNextTask(): void {
-    if (this.taskQueue.length === 0) return;
-    const idleWorker = this.workers.find((w) => !w.busy);
-    if (idleWorker) {
+    while (this.taskQueue.length > 0) {
+      const idleWorker = this.workers.find((w) => !w.busy);
+      if (!idleWorker) break;
+
       const task = this.taskQueue.shift();
       this.executeTask(idleWorker, task);
     }
@@ -199,7 +200,18 @@ export class GulpChokelessPool {
       this.activeStreams++;
       this.workers.forEach((w) => w.worker.ref());
 
-      return new ConcurrentTransform(
+      let streamCleanedUp = false;
+      const cleanup = (): void => {
+        if (streamCleanedUp) return;
+        streamCleanedUp = true;
+        this.activeStreams--;
+        if (this.activeStreams <= 0) {
+          this.activeStreams = 0;
+          this.workers.forEach((w) => w.worker.unref());
+        }
+      };
+
+      const stream = new ConcurrentTransform(
         {concurrency: this.poolConcurrency},
         (file: any, enc: string, cb: any) => {
           if (file.isNull()) return cb(null, file);
@@ -211,14 +223,15 @@ export class GulpChokelessPool {
             .catch((err: any) => this.handleTaskError(err, file, currentOptions, cb));
         },
         (cb: any): void => {
-          this.activeStreams--;
-          if (this.activeStreams <= 0) {
-            this.activeStreams = 0;
-            this.workers.forEach((w) => w.worker.unref());
-          }
+          cleanup();
           cb();
         }
       );
+
+      stream.once('close', cleanup);
+      stream.once('error', cleanup);
+
+      return stream;
     };
   }
 }
