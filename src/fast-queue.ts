@@ -8,8 +8,9 @@ interface QueueNode<T> {
 }
 
 /**
- * A lock-free, O(1) high-performance queue designed to replace slow array.shift() operations.
+ * A linked-list-based, O(1) high-performance queue designed to replace slow array.shift() operations.
  * Essential for fast message passing and task scheduling without shifting array indexes.
+ * Intended for single-threaded JavaScript use; this is not a thread-safe concurrent queue.
  * @typeParam T - Type of elements stored in the queue.
  */
 export class FastQueue<T> {

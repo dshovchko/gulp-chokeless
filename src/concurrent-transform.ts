@@ -5,7 +5,7 @@ import type {TransformCallback} from 'stream';
  * Options for configuring the ConcurrentTransform stream concurrency parameters.
  */
 export interface ConcurrentTransformOptions {
-  /** Maximum number of parallel tasks executed currently. */
+  /** Maximum number of tasks processed concurrently. */
   concurrency?: number;
   /** Whether the stream operates in object mode. Default true. */
   objectMode?: boolean;
@@ -47,10 +47,10 @@ export class ConcurrentTransform extends Transform {
     }
     super({
       objectMode: options.objectMode !== false,
-      highWaterMark: options.highWaterMark || 16
+      highWaterMark: options.highWaterMark ?? 16
     });
 
-    this.concurrency = options.concurrency || 1;
+    this.concurrency = options.concurrency ?? 1;
     this.performTask = performTask;
     this.flushCallback = flushCallback;
   }

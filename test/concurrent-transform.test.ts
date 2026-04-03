@@ -42,6 +42,14 @@ describe('ConcurrentTransform', () => {
     });
   });
 
+  it('should correctly allow configuration of highWaterMark to 0', () => {
+    const transform = new ConcurrentTransform(
+      { concurrency: 1, objectMode: true, highWaterMark: 0 },
+      (chunk, enc, cb) => cb()
+    );
+    expect(transform.writableHighWaterMark).toBe(0);
+  });
+
   it('should correctly respect the concurrency limit', () => {
     return new Promise<void>((resolve, reject) => {
       let activeTasks = 0;
