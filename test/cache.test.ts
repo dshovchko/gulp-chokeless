@@ -10,15 +10,15 @@ describe('Worker cache validation via init()', () => {
     const pool = createPool({ workerPath: path.resolve(dirname, 'dummy-cache-worker.js'), concurrency: 1 });
 
     // Fake a gulp file buffer handler
-    const run = (stream) => new Promise(res => {
-    let data = null;
-    let endEvent = false;
-    stream.on('data', f => data = f.contents.toString());
-    stream.on('error', e => res(e));
-    stream.on('end', () => {
-      endEvent = true;
-      res(data);
-    });
+    const run = (stream) => new Promise((resolve, reject) => {
+      let data = null;
+      let endEvent = false;
+      stream.on('data', f => data = f.contents.toString());
+      stream.on('error', e => reject(e));
+      stream.on('end', () => {
+        endEvent = true;
+        resolve(data);
+      });
 
     // Some streams need cb logic, we wrap process as mockFile
     stream.write({
