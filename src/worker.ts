@@ -32,7 +32,6 @@ function handleInitMessage(message: any): void {
         // eslint-disable-next-line require-atomic-updates
         currentHandler = null;
         parentPort!.postMessage({type: 'init_done', error: err.message});
-        console.error('Worker init error:', err);
         throw err;
       }
     })();
@@ -48,7 +47,6 @@ function handleInitMessage(message: any): void {
         }
       } catch (err: any) {
         parentPort!.postMessage({type: 'init_done', error: err.message});
-        console.error('Worker re-init error:', err);
         throw err; // Ensure subsequent tasks fail if re-init fails
       }
     });
