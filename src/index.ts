@@ -38,7 +38,7 @@ export class GulpChokelessPool {
     }
     this.baseOptions = baseOptions;
 
-    this.poolConcurrency = baseOptions.concurrency || Math.max(1, Math.round(os.cpus().length * 0.75));
+    this.poolConcurrency = baseOptions.concurrency || Math.max(1, Math.floor(os.cpus().length * 0.75));
 
     // Calculate or reuse connection pool size
     for (let i = 0; i < this.poolConcurrency; i++) {
@@ -102,9 +102,13 @@ export class GulpChokelessPool {
     });
 
     worker.on('exit', (code) => {
-      if (code !== 0) {
+      const hadPendingCallbacks = workerInfo.callbacks.size > 0;
+      if (hadPendingCallbacks) {
         for (const [, cb] of workerInfo.callbacks.entries()) cb(new Error(`Worker stopped with exit code ${code}`), null);
         workerInfo.callbacks.clear();
+        workerInfo.busy = false;
+      }
+      if (code !== 0 || hadPendingCallbacks) {
         this.replaceDeadWorker(workerInfo);
       }
     });
