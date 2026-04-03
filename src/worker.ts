@@ -28,8 +28,12 @@ function handleInitMessage(message: any): void {
           parentPort!.postMessage({type: 'init_done'});
         }
       } catch (err: any) {
+        lastWorkerPath = null;
+        // eslint-disable-next-line require-atomic-updates
+        currentHandler = null;
         parentPort!.postMessage({type: 'init_done', error: err.message});
         console.error('Worker init error:', err);
+        throw err;
       }
     })();
   } else if (initPromise && opts.workerPath === lastWorkerPath) {
