@@ -136,13 +136,22 @@ export class GulpChokelessPool {
     const id = ++this.workerIdCounter;
     workerInfo.busy = true;
     workerInfo.callbacks.set(id, task.cb);
-    workerInfo.worker.postMessage({
-      sab: task.sab,
-      filename: task.filename,
-      sourceMap: task.sourceMap,
-      options: task.options,
-      id
-    });
+    try {
+      workerInfo.worker.postMessage({
+        sab: task.sab,
+        filename: task.filename,
+        sourceMap: task.sourceMap,
+        options: task.options,
+        id
+      });
+    } catch (err: any) {
+      workerInfo.callbacks.delete(id);
+      workerInfo.busy = false;
+
+      // Re-queue the task so it gets picked up immediately by the replacement.
+      this.taskQueue.unshift(task);
+      this.replaceDeadWorker(workerInfo);
+    }
   }
 
   private processTask(buffer: Buffer, filename: string, sourceMap: boolean, options: any): Promise<any> {

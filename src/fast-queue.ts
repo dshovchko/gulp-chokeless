@@ -8,6 +8,15 @@ export class FastQueue<T> {
   private tail: QueueNode<T> | null = null;
   public length = 0;
 
+  unshift(value: T): void {
+    const node: QueueNode<T> = {value, next: this.head};
+    this.head = node;
+    if (this.tail === null) {
+      this.tail = node;
+    }
+    this.length++;
+  }
+
   push(value: T): void {
     const node: QueueNode<T> = {value, next: null};
     if (this.tail !== null) {
