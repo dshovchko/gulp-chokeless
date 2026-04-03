@@ -15,12 +15,12 @@ We solved this by building a dedicated **multithreaded orchestrator** tailored s
 * **Smart Resource Management:** Uses an encapsulated `GulpChokelessPool` and custom lock-free O(1) `FastQueue` to efficiently balance the load across CPU cores without memory leaks or race conditions.
 * **Isolated State:** You can spawn multiple independent worker pools in a single Gulp pipeline without overlapping configurations.
 
-In other words, this acts as a universal transformer that converts a standard Gulp pipe into a high-throughput, multithreaded execution pipeline. We have meticulously optimized its performance by implementing early worker initialization, warming up the AST and JIT compilers ahead of time, and leveraging Shared Memory to reduce IPC overhead and avoid extra structured-clone costs where possible.
+In other words, this acts as a universal transformer that converts a standard Gulp pipe into a high-throughput, multithreaded execution pipeline. We have meticulously optimized its performance by implementing early worker initialization, warming up the AST and JIT compilers ahead of time, and leveraging Shared Memory to reduce inter-thread message-passing overhead and avoid extra structured-clone costs where possible.
 
 **⚠️ IMPORTANT WARNING: DO NOT USE THIS EVERYWHERE!**  
-Multithreading introduces **IPC (Inter-Process Communication) overhead** — it takes time to serialize, send, and deserialize data between the main thread and workers. 
+Multithreading introduces **inter-thread communication overhead** — it takes time to serialize, send, and deserialize data between the main thread and worker threads. 
 * **DO use it for:** CPU-intensive tasks like compiling LESS/SASS, running Babel, LightningCSS, terser, etc.
-* **DO NOT use it for:** Trivial tasks like renaming files, string replacements, or simple concatenation. For simple tasks, the IPC overhead will make your pipeline *slower* than running it natively on a single thread. Avoid inserting it blindly.
+* **DO NOT use it for:** Trivial tasks like renaming files, string replacements, or simple concatenation. For simple tasks, the inter-thread messaging and structured-clone overhead can make your pipeline *slower* than running it natively on a single thread. Avoid inserting it blindly.
 
 ## Requirements
 
