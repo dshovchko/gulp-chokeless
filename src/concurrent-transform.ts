@@ -1,15 +1,32 @@
 import {Transform} from 'stream';
 import type {TransformCallback} from 'stream';
 
+/**
+ * Options for configuring the ConcurrentTransform stream concurrency parameters.
+ */
 export interface ConcurrentTransformOptions {
+  /** Maximum number of parallel tasks executed currently. */
   concurrency?: number;
+  /** Whether the stream operates in object mode. Default true. */
   objectMode?: boolean;
+  /** Custom highWaterMark parameter for underlying Transform stream buffering. */
   highWaterMark?: number;
 }
 
+/**
+ * Signature for a background operation triggered concurrently against stream chunks.
+ */
 export type PerformTask = (chunk: any, encoding: string, callback: TransformCallback) => void;
+
+/**
+ * Signature for an optional finalizer callback to be executed before the stream flushing completes.
+ */
 export type FlushCallback = (callback: TransformCallback) => void;
 
+/**
+ * A custom Transform stream implementation that processes chunks explicitly
+ * concurrently, guaranteeing the process remains below specified limits.
+ */
 export class ConcurrentTransform extends Transform {
   private concurrency: number;
   private performTask: PerformTask;
