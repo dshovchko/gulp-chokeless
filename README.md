@@ -10,12 +10,12 @@ High-performance, multithreaded stream orchestrator for Gulp via Node.js `worker
 
 Gulp runs on Node.js, which is fundamentally single-threaded. In massive enterprise codebases (like large AEM projects), running tasks such as LESS compilation combined with LightningCSS minification can severely block the main Event Loop. This leads to degraded performance, slow watch tasks, and unutilized CPU cores.
 
-We solved this by building a dedicated **multithreaded orchestrator** tailored specifically for stream pipelines:
+The solution solves the problem by building a dedicated **multithreaded orchestrator** tailored specifically for stream pipelines:
 * **True Multithreading:** Utilizes native Node.js `worker_threads` to process multiple files strictly in parallel.
 * **Smart Resource Management:** Uses an encapsulated `GulpChokelessPool` and custom lock-free O(1) `FastQueue` to efficiently balance the load across CPU cores without memory leaks or race conditions.
 * **Isolated State:** You can spawn multiple independent worker pools in a single Gulp pipeline without overlapping configurations.
 
-In other words, this acts as a universal transformer that converts a standard Gulp pipe into a high-throughput, multithreaded execution pipeline. We have meticulously optimized its performance by implementing early worker initialization, warming up the AST and JIT compilers ahead of time, and leveraging Shared Memory to reduce inter-thread message-passing overhead and avoid extra structured-clone costs where possible.
+In other words, this acts as a universal transformer that converts a standard Gulp pipe into a high-throughput, multithreaded execution pipeline. It was meticulously optimized its performance by implementing early worker initialization, warming up the AST and JIT compilers ahead of time, and leveraging Shared Memory to reduce inter-thread message-passing overhead and avoid extra structured-clone costs where possible.
 
 **⚠️ IMPORTANT WARNING: DO NOT USE THIS EVERYWHERE!**  
 Multithreading introduces **inter-thread communication overhead** — it takes time to serialize, send, and deserialize data between the main thread and worker threads. 
@@ -26,6 +26,16 @@ Multithreading introduces **inter-thread communication overhead** — it takes t
 
 * **Node.js:** `>= 22.0.0` (optimized for the latest V8 engine features)
 * **Gulp:** `>= 5.0.0`
+
+## Installation
+
+```bash
+npm install gulp-chokeless --save-dev
+# or
+yarn add gulp-chokeless -D
+# or
+pnpm add gulp-chokeless -D
+```
 
 ## API & Usage Guide
 
@@ -75,19 +85,20 @@ const __dirname = import.meta.dirname;
 // 1. Initialize the thread pool
 const lessCompiler = gulpChokelessPool({
   workerPath: path.resolve(__dirname, './worker.js'),
-  concurrency: 4, // Optional: defaults to ~75% of your CPU cores
-  workerOptions: {
-    // This entire object is passed to your worker's process() function
-    less: { math: 'always' },
-    lightningcss: { minify: true }
-  }
+  concurrency: 4 // Optional: defaults to ~75% of your CPU cores
 });
 
 // 2. Consume the pool in a standard Gulp pipeline
 export function buildStyles() {
   return gulp.src('src/styles/**/*.less', { sourcemaps: true })
     // Pipe all streams into the thread pool
-    .pipe(lessCompiler())
+    .pipe(lessCompiler({
+      workerOptions: {
+        // This entire object is passed to your worker's process() function
+        less: { math: 'always' },
+        lightningcss: { minify: true }
+      }
+    }))
     .on('error', function(err) {
       console.error('Task failed:', err.message);
       this.emit('end'); // Prevents gulp watch from crashing!
