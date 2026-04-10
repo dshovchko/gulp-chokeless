@@ -1,31 +1,84 @@
 # gulp-chokeless
 
+[![npm version](https://img.shields.io/npm/v/gulp-chokeless.svg)](https://www.npmjs.com/package/gulp-chokeless)
+[![node version](https://img.shields.io/node/v/gulp-chokeless.svg)](https://www.npmjs.com/package/gulp-chokeless)
+[![license](https://img.shields.io/npm/l/gulp-chokeless.svg)](https://github.com/dshovchko/gulp-chokeless/blob/main/LICENSE)
+
 High-performance, multithreaded stream orchestrator for Gulp via Node.js `worker_threads`.
 
 ## What is this?
 
 `gulp-chokeless` is a specialized Gulp plugin designed to offload heavy, CPU-intensive file transformations (like CSS compilation, transpilation, or minification) from the main Node.js thread to an isolated pool of background workers.
 
-## Why reinvent the bicycle?
+**Why "chokeless"?** By moving synchronous heavy lifting into background threads, it prevents your Node.js Event Loop from "choking" (hanging or stalling) during large builds, leaving your main pipeline fast and completely responsive.
+
+## Why reinvent the wheel?
 
 Gulp runs on Node.js, which is fundamentally single-threaded. In massive enterprise codebases (like large AEM projects), running tasks such as LESS compilation combined with LightningCSS minification can severely block the main Event Loop. This leads to degraded performance, slow watch tasks, and unutilized CPU cores.
 
-We solved this by building a dedicated **multithreaded orchestrator** tailored specifically for stream pipelines:
-* **True Multithreading:** Utilizes native Node.js `worker_threads` to process multiple files strictly in parallel.
-* **Smart Resource Management:** Uses an encapsulated `GulpChokelessPool` and custom lock-free O(1) `FastQueue` to efficiently balance the load across CPU cores without memory leaks or race conditions.
+The solution solves the problem by building a dedicated **multithreaded orchestrator** tailored specifically for stream pipelines:
+* **True Multithreading:** Utilizes native Node.js `worker_threads` to process multiple files in parallel.
+* **Smart Resource Management:** Uses an encapsulated `GulpChokelessPool` and custom linked-list O(1) `FastQueue` on the main thread to efficiently balance the load across CPU cores without memory leaks or race conditions.
 * **Isolated State:** You can spawn multiple independent worker pools in a single Gulp pipeline without overlapping configurations.
 
-In other words, this acts as a universal transformer that converts a standard Gulp pipe into a high-throughput, multithreaded execution pipeline. We have meticulously optimized its performance by implementing early worker initialization, warming up the AST and JIT compilers ahead of time, and leveraging Shared Memory to reduce inter-thread message-passing overhead and avoid extra structured-clone costs where possible.
+In other words, this acts as a universal transformer that converts a standard Gulp pipe into a high-throughput, multithreaded execution pipeline. Performance was meticulously optimized by implementing early worker initialization, warming up the AST and JIT compilers ahead of time, and leveraging Shared Memory to reduce inter-thread message-passing overhead and avoid extra structured-clone costs where possible.
 
 **⚠️ IMPORTANT WARNING: DO NOT USE THIS EVERYWHERE!**  
 Multithreading introduces **inter-thread communication overhead** — it takes time to serialize, send, and deserialize data between the main thread and worker threads. 
 * **DO use it for:** CPU-intensive tasks like compiling LESS/SASS, running Babel, LightningCSS, terser, etc.
 * **DO NOT use it for:** Trivial tasks like renaming files, string replacements, or simple concatenation. For simple tasks, the inter-thread messaging and structured-clone overhead can make your pipeline *slower* than running it natively on a single thread. Avoid inserting it blindly.
 
+## How it works
+
+At a high level, the architecture separates stream management from heavy computation:
+
+```text
+┌───────────────────────┐
+│ Main Node.js Thread   │ ◄─ gulp.src() emits files
+└──────────┬────────────┘
+           │ 1. Stream chunks (Vinyl files)
+           ▼
+┌───────────────────────┐
+│ GulpChokelessPool     │ ◄─ Orchestrates workers
+└──────────┬────────────┘
+           │ 2. Files pushed to O(1) FastQueue
+           │ 3. Tasks dispatched via IPC
+           ▼
+┌───────────────────────┐
+│   Worker Threads      │ ◄─ Strictly parallel execution
+│ ┌──────┐ ┌──────┐     │
+│ │ W(1) │ │ W(2) │ ... │
+│ └──────┘ └──────┘     │
+└──────────┬────────────┘
+           │ 4. Transformed content returned
+           ▼
+┌───────────────────────┐
+│ Main Node.js Thread   │ ◄─ Pipeline resumes
+└───────────────────────┘
+           │ 5. Transformed files restored to stream
+           ▼
+          gulp.dest()
+```
+
+1. **Intake:** The main Gulp stream pipes files into the orchestrator.
+2. **Queueing:** Files are buffered inside a custom `FastQueue` to provide O(1) enqueue/dequeue operations and avoid `array.shift()` overhead.
+3. **Processing:** The pool manager assigns files to available background workers, ensuring zero Event Loop blocking on the main thread.
+4. **Re-assembly:** Workers return the processed code (along with sourcemaps & new extensions) back to the main thread, which resumes the standard Gulp pipeline.
+
 ## Requirements
 
 * **Node.js:** `>= 22.0.0` (optimized for the latest V8 engine features)
 * **Gulp:** `>= 5.0.0`
+
+## Installation
+
+```bash
+npm install gulp-chokeless --save-dev
+# or
+yarn add gulp-chokeless -D
+# or
+pnpm add gulp-chokeless -D
+```
 
 ## API & Usage Guide
 
@@ -39,9 +92,10 @@ The worker must export an async `process` function. This is where your heavy lif
 import less from 'less';
 
 export async function init() {
-  // Optional: May run when the worker starts and again at the beginning of each stream
-  // (for example in watch mode or after cache resets), so keep this limited to light
-  // warm-up/reset work rather than expensive one-time setup.
+  // Optional: May run when the worker is first started/pre-warmed, and again
+  // at the start of a new Gulp stream pipeline or when the worker is reinitialized.
+  // This makes it useful for clearing caches during 'watch' mode rebuilds, but
+  // avoid placing heavy one-time startup tasks here since it can run more than once.
   return 'Worker is ready!';
 }
 
@@ -75,21 +129,23 @@ const __dirname = import.meta.dirname;
 // 1. Initialize the thread pool
 const lessCompiler = gulpChokelessPool({
   workerPath: path.resolve(__dirname, './worker.js'),
-  concurrency: 4, // Optional: defaults to ~75% of your CPU cores
-  workerOptions: {
-    // This entire object is passed to your worker's process() function
-    less: { math: 'always' },
-    lightningcss: { minify: true }
-  }
+  concurrency: 4 // Optional: defaults to ~75% of your CPU cores
 });
 
 // 2. Consume the pool in a standard Gulp pipeline
 export function buildStyles() {
   return gulp.src('src/styles/**/*.less', { sourcemaps: true })
     // Pipe all streams into the thread pool
-    .pipe(lessCompiler())
+    .pipe(lessCompiler({
+      workerOptions: {
+        // This entire object is passed to your worker's process() function
+        less: { math: 'always' },
+        lightningcss: { minify: true }
+      }
+    }))
     .on('error', function(err) {
       console.error('Task failed:', err.message);
+      // Note: Must use a regular function (not an arrow function) so 'this' refers to the stream
       this.emit('end'); // Prevents gulp watch from crashing!
     })
     .pipe(gulp.dest('dist/css', { sourcemaps: '.' }));
@@ -113,3 +169,8 @@ When initializing `gulpChokelessPool(options)`, you can pass:
 Not sure how to wire everything together cleanly with LESS + LightningCSS + Banner injection? 
 
 Check out the fully working boilerplate in the [`example/`](./example) directory! It demonstrates the optimal architecture for splitting operations into clean Node.js modules without cluttering the main task file.
+
+## Links & License
+
+- **GitHub Repository**: [dshovchko/gulp-chokeless](https://github.com/dshovchko/gulp-chokeless)
+- **License**: [MIT](./LICENSE)

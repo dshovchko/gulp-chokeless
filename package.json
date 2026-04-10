@@ -1,6 +1,6 @@
 {
   "name": "gulp-chokeless",
-  "version": "1.0.0",
+  "version": "1.0.0-beta.5",
   "description": "High-performance, multithreaded stream orchestrator for Gulp via worker_threads",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -12,6 +12,9 @@
       "require": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "lint": "eslint \"src/**/*.ts\" --max-warnings 3",
@@ -35,6 +38,14 @@
   ],
   "author": "Dmytro Shovchko",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dshovchko/gulp-chokeless.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dshovchko/gulp-chokeless/issues"
+  },
+  "homepage": "https://github.com/dshovchko/gulp-chokeless#readme",
   "peerDependencies": {
     "gulp": ">=5.0.0"
   },
