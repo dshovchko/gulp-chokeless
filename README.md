@@ -18,7 +18,7 @@ Gulp runs on Node.js, which is fundamentally single-threaded. In massive enterpr
 
 The solution solves the problem by building a dedicated **multithreaded orchestrator** tailored specifically for stream pipelines:
 * **True Multithreading:** Utilizes native Node.js `worker_threads` to process multiple files in parallel.
-* **Smart Resource Management:** Uses an encapsulated `GulpChokelessPool` and custom lock-free O(1) `FastQueue` to efficiently balance the load across CPU cores without memory leaks or race conditions.
+* **Smart Resource Management:** Uses an encapsulated `GulpChokelessPool` and custom linked-list O(1) `FastQueue` on the main thread to efficiently balance the load across CPU cores without memory leaks or race conditions.
 * **Isolated State:** You can spawn multiple independent worker pools in a single Gulp pipeline without overlapping configurations.
 
 In other words, this acts as a universal transformer that converts a standard Gulp pipe into a high-throughput, multithreaded execution pipeline. Performance was meticulously optimized by implementing early worker initialization, warming up the AST and JIT compilers ahead of time, and leveraging Shared Memory to reduce inter-thread message-passing overhead and avoid extra structured-clone costs where possible.
@@ -61,7 +61,7 @@ At a high level, the architecture separates stream management from heavy computa
 ```
 
 1. **Intake:** The main Gulp stream pipes files into the orchestrator.
-2. **Queueing:** Files are buffered inside a custom `FastQueue` to stabilize memory usage.
+2. **Queueing:** Files are buffered inside a custom `FastQueue` to provide O(1) enqueue/dequeue operations and avoid `array.shift()` overhead.
 3. **Processing:** The pool manager assigns files to available background workers, ensuring zero Event Loop blocking on the main thread.
 4. **Re-assembly:** Workers return the processed code (along with sourcemaps & new extensions) back to the main thread, which resumes the standard Gulp pipeline.
 
@@ -92,9 +92,10 @@ The worker must export an async `process` function. This is where your heavy lif
 import less from 'less';
 
 export async function init() {
-  // Optional: Executes exactly once per worker for every new Gulp stream pipeline.
-  // This makes it perfect for clearing caches during 'watch' mode rebuilds.
-  // Since it runs per-stream, avoid placing heavy one-time startup tasks here.
+  // Optional: May run when the worker is first started/pre-warmed, and again
+  // at the start of a new Gulp stream pipeline or when the worker is reinitialized.
+  // This makes it useful for clearing caches during 'watch' mode rebuilds, but
+  // avoid placing heavy one-time startup tasks here since it can run more than once.
   return 'Worker is ready!';
 }
 
