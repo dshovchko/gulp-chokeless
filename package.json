@@ -20,7 +20,8 @@
     "lint": "eslint \"src/**/*.ts\" --max-warnings 3",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run lint && npm run test"
   },
   "engines": {
     "node": ">=22.0.0"
