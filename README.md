@@ -6,6 +6,58 @@
 
 High-performance, multithreaded stream orchestrator for Gulp via Node.js `worker_threads`.
 
+---
+
+## Table of Contents
+
+- [gulp-chokeless](#gulp-chokeless)
+  - [Table of Contents](#table-of-contents)
+  - [Benchmarks](#benchmarks)
+  - [What is this?](#what-is-this)
+  - [Why reinvent the wheel?](#why-reinvent-the-wheel)
+  - [How it works](#how-it-works)
+  - [Requirements](#requirements)
+  - [Installation](#installation)
+  - [API \& Usage Guide](#api--usage-guide)
+  - [Options](#options)
+  - [Examples](#examples)
+  - [Links \& License](#links--license)
+
+---
+
+## Benchmarks
+
+Benchmark scenario: process files from `node_modules` across three workload profiles
+(CPU-bound brotli + pbkdf2 hashing, Markdown → HTML rendering, JSON schema validation).
+Full results across Intel Core Ultra 7 155U and AMD EPYC 9645 — see [`benchmarks/README.md`](https://github.com/dshovchko/gulp-chokeless/blob/main/benchmarks/README.md).
+
+**Quick numbers — brotli + pbkdf2-sha256, Intel Core Ultra 7 155U, c=10:**
+
+| Approach | Mean time | vs. single-thread Gulp |
+|---|---|---|
+| `gulp` single-thread (inline `Transform`) | 10.5 s | baseline |
+| **`gulp` + `gulp-chokeless`** | **2.0 s** | **5.2× faster** |
+
+At `concurrency=1` the two variants tie across every scenario — `gulp-chokeless`
+adds no measurable overhead, so it is a safe drop-in even for builds that
+cannot parallelise.
+
+**Concurrency starting point:** 75-100% of cores for CPU-bound stages
+(LESS/SASS, Babel/SWC, terser, LightningCSS, image processing). For trivial
+transforms (renames, string replacements, fast schema validation) keep the
+work on the main thread — the inter-thread serialisation cost can outweigh
+the work itself.
+
+Run your own baseline and read the full analysis in [`benchmarks/README.md`](https://github.com/dshovchko/gulp-chokeless/blob/main/benchmarks/README.md):
+
+```bash
+# Requires hyperfine — install instructions in benchmarks/README.md
+cd benchmarks
+npm run bench:compress -- -c 8
+```
+
+---
+
 ## What is this?
 
 `gulp-chokeless` is a specialized Gulp plugin designed to offload heavy, CPU-intensive file transformations (like CSS compilation, transpilation, or minification) from the main Node.js thread to an isolated pool of background workers.
