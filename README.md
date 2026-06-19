@@ -20,6 +20,7 @@ High-performance, multithreaded stream orchestrator for Gulp via Node.js `worker
   - [Installation](#installation)
   - [API \& Usage Guide](#api--usage-guide)
   - [Options](#options)
+  - [Worker Stats](#worker-stats)
   - [Examples](#examples)
   - [Links \& License](#links--license)
 
@@ -213,8 +214,66 @@ When initializing `gulpChokelessPool(options)`, you can pass:
 | `workerPath` | `string` | **required** | Absolute path to the worker file. |
 | `concurrency`| `number` | `CPUs * 0.75` | Maximum number of concurrent worker threads to spawn. |
 | `workerOptions`| `object` | `{}` | An object containing configs grouped by tool (passed directly to the worker). |
+| `onStats`| `function` | `undefined` | Optional callback invoked with per-worker load stats each time a stream finishes. Enables [Worker Stats](#worker-stats). |
 
 > **Note on `concurrency`:** You can specify more workers than your machine has CPU cores—nothing will break and the pipeline will still execute successfully. However, doing so will likely slow down your task due to the extra processing overhead of managing those extra workers and context switching. By default, the auto mode dynamically sets concurrency to 75% of your available logical cores (but never less than 1).
+
+## Worker Stats
+
+For debugging worker code and tuning `concurrency`, you can opt into worker load statistics by passing an `onStats` callback. It receives how busy each worker thread was and how the work was distributed, so you can spot under-utilized pools or uneven load.
+
+The callback fires **once per stream**, right after that stream finishes — so a pool reused across several pipelines reports each one separately, scoped to that stream's own files. It runs off the per-task hot path and is guarded internally, so a throwing reporter can never break your pipeline. It is invoked synchronously during stream cleanup, so keep it lightweight to avoid delaying stream completion.
+
+```javascript
+const lessCompiler = gulpChokelessPool({
+  workerPath: path.resolve(__dirname, './worker.js'),
+  concurrency: 4,
+  onStats: (stats) => {
+    const { avgUtilization, minUtilization, maxUtilization, spread, totalTasks } = stats.summary;
+    const pct = (n) => `${(n * 100).toFixed(1)}%`;
+
+    console.log('\n--- Worker Stats ---');
+    console.log(`utilization: avg=${pct(avgUtilization)} min=${pct(minUtilization)} max=${pct(maxUtilization)} spread=${(spread * 100).toFixed(1)}pp`);
+    console.log(`tasks: total=${totalTasks}`);
+    stats.workers.forEach((w, i) => {
+      console.log(`  worker ${i}: ${pct(w.utilization)} (${w.tasksProcessed} tasks)`);
+    });
+  }
+});
+```
+
+**Stats shape:**
+
+```ts
+interface PoolStats {
+  workers: Array<{
+    utilization: number;     // event loop utilization over the stream (0-1)
+    tasksProcessed: number;  // files this worker handled during the stream
+  }>;
+  summary: {
+    avgUtilization: number;
+    minUtilization: number;
+    maxUtilization: number;
+    spread: number;          // maxUtilization - minUtilization (0-1)
+    totalTasks: number;
+  };
+}
+```
+
+**Reading the numbers:**
+
+| Signal | Interpretation |
+|---|---|
+| `utilization` near 100% | Workers are fully saturated — ideal for CPU-bound stages. |
+| `utilization` below ~50% | Tasks are too light for this concurrency level — try fewer workers. |
+| `spread` small | Work is evenly distributed across the pool. |
+| `spread` large | Imbalance — a heavy "monster file" kept one worker busy, or too many workers for too few files. |
+
+> `pp` = percentage points — the absolute difference between two percentages.
+
+**How it works:** utilization comes from Node.js [`worker.performance.eventLoopUtilization()`](https://nodejs.org/api/worker_threads.html#workerperformanceeventlooputilizationutilization1-utilization2) — a zero-cost read from a `SharedArrayBuffer`. Each stream captures a per-worker baseline at start and reads the delta at finish; the only per-task cost is a single integer increment. **No overhead is added to the dispatch loop or worker execution path.**
+
+> **Overlapping streams:** stats are measured per stream as deltas. Since concurrent streams share the same worker pool, their utilization windows overlap and the same worker activity is attributed to each. The numbers are exact for the common case of streams running one after another (e.g. sequential `gulp` tasks).
 
 ## Examples
 
