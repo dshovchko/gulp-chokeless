@@ -143,4 +143,87 @@ describe('Integration with Worker Threads', () => {
     expect(out).toHaveLength(1);
     expect(out[0].contents?.toString()).toBe('hello-OK');
   });
+
+  it('7. Reports worker stats via onStats once all streams finish', async () => {
+    let stats: any = null;
+    const pool = createGulpWorkerPool({
+      workerPath: dummyWorkerPath,
+      concurrency: 2,
+      onStats: (s: any) => { stats = s; }
+    });
+    const stream = pool({ workerOptions: { suffix: '-S' }});
+
+    const files = [
+      new MockFile({ contents: Buffer.from('A'), path: '/a.less' }),
+      new MockFile({ contents: Buffer.from('B'), path: '/b.less' }),
+      new MockFile({ contents: Buffer.from('C'), path: '/c.less' }),
+    ];
+
+    await runStream(stream, files);
+
+    expect(stats).not.toBeNull();
+    expect(stats.workers).toHaveLength(2);
+    expect(stats.summary.totalTasks).toBe(3);
+
+    for (const w of stats.workers) {
+      expect(Number.isFinite(w.utilization)).toBe(true);
+      expect(w.utilization).toBeGreaterThanOrEqual(0);
+      expect(w.utilization).toBeLessThanOrEqual(1);
+      expect(Number.isInteger(w.tasksProcessed)).toBe(true);
+    }
+
+    const {avgUtilization, minUtilization, maxUtilization, spread} = stats.summary;
+    expect(minUtilization).toBeLessThanOrEqual(avgUtilization);
+    expect(avgUtilization).toBeLessThanOrEqual(maxUtilization);
+    expect(spread).toBeCloseTo(maxUtilization - minUtilization, 10);
+  });
+
+  it('8. Reports stats per stream, scoped to each stream\'s own tasks', async () => {
+    const reports: any[] = [];
+    const pool = createGulpWorkerPool({
+      workerPath: dummyWorkerPath,
+      concurrency: 2,
+      onStats: (s: any) => { reports.push(s); }
+    });
+
+    const stream1 = pool({ workerOptions: { suffix: '-1' }});
+    await runStream(stream1, [
+      new MockFile({ contents: Buffer.from('A'), path: '/a.less' }),
+      new MockFile({ contents: Buffer.from('B'), path: '/b.less' }),
+    ]);
+
+    const stream2 = pool({ workerOptions: { suffix: '-2' }});
+    await runStream(stream2, [
+      new MockFile({ contents: Buffer.from('C'), path: '/c.less' }),
+      new MockFile({ contents: Buffer.from('D'), path: '/d.less' }),
+      new MockFile({ contents: Buffer.from('E'), path: '/e.less' }),
+    ]);
+
+    // One report per stream, each counting only its own files (not cumulative).
+    expect(reports).toHaveLength(2);
+    expect(reports[0].summary.totalTasks).toBe(2);
+    expect(reports[1].summary.totalTasks).toBe(3);
+  });
+
+  it('9. Does not collect stats when onStats is not provided', async () => {
+    const pool = createGulpWorkerPool({ workerPath: dummyWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('X'), path: '/x.less' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    expect(out[0].contents?.toString()).toBe('X-PROCESSED');
+  });
+
+  it('10. Tolerates a stray onStats in per-stream options (no DataCloneError)', async () => {
+    const pool = createGulpWorkerPool({ workerPath: dummyWorkerPath, concurrency: 1 });
+    // onStats is a pool-only callback; passing it per-stream must not crash the
+    // worker postMessage (a function would otherwise throw DataCloneError).
+    const stream = pool({ onStats: () => {}, workerOptions: { suffix: '-Z' } });
+    const files = [new MockFile({ contents: Buffer.from('Y'), path: '/y.less' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    expect(out[0].contents?.toString()).toBe('Y-Z');
+  });
 });
