@@ -71,15 +71,14 @@ function handleInitMessage(message: any): void {
   }
 }
 
-function processTaskResult(res: any, id: number, sourceMap: boolean): void {
+function processTaskResult(res: any, sourceMap: boolean): void {
   if (!res) {
-    parentPort!.postMessage({id, result: '', imports: []});
+    parentPort!.postMessage({result: '', imports: []});
     return;
   }
 
   const resultString = res.result || res.css || res.code || (typeof res === 'string' ? res : '');
   const obj: any = {
-    id,
     result: resultString,
     imports: res.imports || []
   };
@@ -96,7 +95,7 @@ function processTaskResult(res: any, id: number, sourceMap: boolean): void {
 }
 
 async function handleTaskMessage(message: any): Promise<void> {
-  const {sab, filename, sourceMap, options, id} = message;
+  const {sab, filename, sourceMap, options} = message;
 
   if (initPromise) {
     try {
@@ -106,8 +105,7 @@ async function handleTaskMessage(message: any): Promise<void> {
         error: {
           message: `Worker initialization failed: ${err.message || err.toString()}`,
           filename
-        },
-        id
+        }
       });
     }
   }
@@ -117,13 +115,13 @@ async function handleTaskMessage(message: any): Promise<void> {
   const str = decoder.decode(view);
 
   if (!currentHandler) {
-    return parentPort!.postMessage({error: {message: 'No workerPath defined', filename}, id});
+    return parentPort!.postMessage({error: {message: 'No workerPath defined', filename}});
   }
 
   try {
     const fn = (typeof currentHandler.process === 'function') ? currentHandler.process : currentHandler;
     const res = await fn(str, filename, sourceMap, options.workerOptions || {});
-    processTaskResult(res, id, sourceMap);
+    processTaskResult(res, sourceMap);
   } catch (err: any) {
     parentPort!.postMessage({
       error: {
@@ -131,8 +129,7 @@ async function handleTaskMessage(message: any): Promise<void> {
         line: err.line,
         filename: err.filename || filename,
         extract: err.extract
-      },
-      id
+      }
     });
   }
 }
@@ -151,8 +148,7 @@ if (parentPort) {
             line: err?.line,
             filename: err?.filename || message?.filename,
             extract: err?.extract
-          },
-          id: message?.id
+          }
         });
       });
     }
