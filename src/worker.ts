@@ -4,6 +4,9 @@ import {pathToFileURL} from 'url';
 let currentHandler: any = null;
 let initPromise: Promise<any> | null = null;
 let lastWorkerPath: string | null = null;
+// Cached per-stream worker options (set on init) so each task message need not
+// re-clone the (potentially large) options object across the worker boundary.
+let currentWorkerOptions: any = {};
 
 // Reused across every task: stateless codecs are safe to share and avoid a
 // per-file allocation on the worker hot path.
@@ -30,6 +33,11 @@ async function getHandler(processorPath: string): Promise<any> {
  */
 function handleInitMessage(message: any): void {
   const opts = message.options || {};
+
+  // Cache workerOptions here (per stream / per watch reconfig) so the task hot
+  // path can read them locally instead of the main thread cloning them on every
+  // postMessage.
+  currentWorkerOptions = opts.workerOptions || {};
 
   if (opts.workerPath && opts.workerPath !== lastWorkerPath) {
     lastWorkerPath = opts.workerPath;
@@ -105,7 +113,7 @@ function processTaskResult(res: any, sourceMap: boolean): void {
 }
 
 async function handleTaskMessage(message: any): Promise<void> {
-  const {sab, filename, sourceMap, options} = message;
+  const {sab, filename, sourceMap} = message;
 
   if (initPromise) {
     try {
@@ -129,7 +137,7 @@ async function handleTaskMessage(message: any): Promise<void> {
 
   try {
     const fn = (typeof currentHandler.process === 'function') ? currentHandler.process : currentHandler;
-    const res = await fn(str, filename, sourceMap, options.workerOptions || {});
+    const res = await fn(str, filename, sourceMap, currentWorkerOptions);
     processTaskResult(res, sourceMap);
   } catch (err: any) {
     parentPort!.postMessage({

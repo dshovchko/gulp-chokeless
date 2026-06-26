@@ -310,14 +310,13 @@ export class GulpChokelessPool {
     }
   }
 
-  private executeTask(workerInfo: WorkerInfo, task: {sab: SharedArrayBuffer, filename: string, sourceMap: boolean, options: any, cb: TaskCallback}): void {
+  private executeTask(workerInfo: WorkerInfo, task: {sab: SharedArrayBuffer, filename: string, sourceMap: boolean, cb: TaskCallback}): void {
     workerInfo.callback = task.cb;
     try {
       workerInfo.worker.postMessage({
         sab: task.sab,
         filename: task.filename,
-        sourceMap: task.sourceMap,
-        options: task.options
+        sourceMap: task.sourceMap
       });
     } catch (err: any) {
       workerInfo.callback = null;
@@ -328,7 +327,7 @@ export class GulpChokelessPool {
     }
   }
 
-  private processTask(buffer: Buffer, filename: string, sourceMap: boolean, options: any): Promise<any> {
+  private processTask(buffer: Buffer, filename: string, sourceMap: boolean): Promise<any> {
     const sab = new SharedArrayBuffer(buffer.length);
     const view = new Uint8Array(sab);
     view.set(buffer);
@@ -338,7 +337,6 @@ export class GulpChokelessPool {
         sab,
         filename,
         sourceMap,
-        options,
         cb: (err: Error | null, res: any): void => {
           err ? reject(err) : resolve(res);
         }
@@ -413,7 +411,7 @@ export class GulpChokelessPool {
           if (file.isStream()) return cb(new GulpWorkerError('Streaming not supported'));
 
           const useSourceMap = !!(file.sourceMap || currentOptions.sourcemap);
-          this.processTask(file.contents, file.path, useSourceMap, currentOptions)
+          this.processTask(file.contents, file.path, useSourceMap)
             .then((res: any) => this.handleTaskSuccess(file, res, cb))
             .catch((err: any) => this.handleTaskError(err, file, currentOptions, cb));
         },
