@@ -4,6 +4,14 @@ import {pathToFileURL} from 'url';
 let currentHandler: any = null;
 let initPromise: Promise<any> | null = null;
 let lastWorkerPath: string | null = null;
+// Cached per-stream worker options (set on init) so each task message need not
+// re-clone the (potentially large) options object across the worker boundary.
+let currentWorkerOptions: any = {};
+
+// Reused across every task: stateless codecs are safe to share and avoid a
+// per-file allocation on the worker hot path.
+const decoder = new TextDecoder('utf-8');
+const encoder = new TextEncoder();
 
 /**
  * Loads a specified user-provided processor module dynamically.
@@ -25,6 +33,11 @@ async function getHandler(processorPath: string): Promise<any> {
  */
 function handleInitMessage(message: any): void {
   const opts = message.options || {};
+
+  // Cache workerOptions here (per stream / per watch reconfig) so the task hot
+  // path can read them locally instead of the main thread cloning them on every
+  // postMessage.
+  currentWorkerOptions = opts.workerOptions || {};
 
   if (opts.workerPath && opts.workerPath !== lastWorkerPath) {
     lastWorkerPath = opts.workerPath;
@@ -71,16 +84,20 @@ function handleInitMessage(message: any): void {
   }
 }
 
-function processTaskResult(res: any, id: number, sourceMap: boolean): void {
+function processTaskResult(res: any, sourceMap: boolean): void {
   if (!res) {
-    parentPort!.postMessage({id, result: '', imports: []});
+    const empty = new Uint8Array(0);
+    parentPort!.postMessage({result: empty.buffer, imports: []}, [empty.buffer]);
     return;
   }
 
   const resultString = res.result || res.css || res.code || (typeof res === 'string' ? res : '');
+  // Encode the result once and transfer its exact-sized backing buffer to the
+  // main thread (zero-copy): the parent wraps it with Buffer.from, sharing the
+  // memory instead of re-serializing the string through structured clone.
+  const bytes = encoder.encode(resultString);
   const obj: any = {
-    id,
-    result: resultString,
+    result: bytes.buffer,
     imports: res.imports || []
   };
 
@@ -92,11 +109,11 @@ function processTaskResult(res: any, id: number, sourceMap: boolean): void {
     obj.sourcemap = typeof res.map === 'string' ? JSON.parse(res.map) : res.map;
   }
 
-  parentPort!.postMessage(obj);
+  parentPort!.postMessage(obj, [bytes.buffer]);
 }
 
 async function handleTaskMessage(message: any): Promise<void> {
-  const {sab, filename, sourceMap, options, id} = message;
+  const {sab, filename, sourceMap} = message;
 
   if (initPromise) {
     try {
@@ -106,24 +123,22 @@ async function handleTaskMessage(message: any): Promise<void> {
         error: {
           message: `Worker initialization failed: ${err.message || err.toString()}`,
           filename
-        },
-        id
+        }
       });
     }
   }
 
   const view = new Uint8Array(sab);
-  const decoder = new TextDecoder('utf-8');
   const str = decoder.decode(view);
 
   if (!currentHandler) {
-    return parentPort!.postMessage({error: {message: 'No workerPath defined', filename}, id});
+    return parentPort!.postMessage({error: {message: 'No workerPath defined', filename}});
   }
 
   try {
     const fn = (typeof currentHandler.process === 'function') ? currentHandler.process : currentHandler;
-    const res = await fn(str, filename, sourceMap, options.workerOptions || {});
-    processTaskResult(res, id, sourceMap);
+    const res = await fn(str, filename, sourceMap, currentWorkerOptions);
+    processTaskResult(res, sourceMap);
   } catch (err: any) {
     parentPort!.postMessage({
       error: {
@@ -131,8 +146,7 @@ async function handleTaskMessage(message: any): Promise<void> {
         line: err.line,
         filename: err.filename || filename,
         extract: err.extract
-      },
-      id
+      }
     });
   }
 }
@@ -151,8 +165,7 @@ if (parentPort) {
             line: err?.line,
             filename: err?.filename || message?.filename,
             extract: err?.extract
-          },
-          id: message?.id
+          }
         });
       });
     }
