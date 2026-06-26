@@ -104,11 +104,28 @@ At `concurrency=1` the two variants tie across every scenario — `gulp-chokeles
 adds no measurable overhead, so it is a safe drop-in even for builds that
 cannot parallelise.
 
-**Concurrency starting point:** 75-100% of cores for CPU-bound stages
-(LESS/SASS, Babel/SWC, terser, LightningCSS, image processing). For trivial
-transforms (renames, string replacements, fast schema validation) keep the
-work on the main thread — the inter-thread serialisation cost can outweigh
-the work itself.
+**Choosing `concurrency`:** the optimum depends on *how heavy your transform is*,
+not just on core count — and the two pull in opposite directions:
+
+- **CPU-bound stages** (LESS/SASS, Babel/SWC, terser, LightningCSS, image
+  processing): scale with your *physical performance* cores. A good starting
+  point is 50-100% of cores, but more workers is not always faster — past the
+  number of fast cores, extra workers only add scheduling overhead. On a 14-thread
+  Intel Core Ultra 7 155U, brotli + pbkdf2 peaked around `concurrency=8` and got
+  *slower* at 10-14.
+- **Light / IO-bound stages** (renames, string replacements, fast schema
+  validation): keep concurrency **low (1-3)**, or do the work inline on the main
+  thread. Here the inter-thread serialisation cost dominates, so adding workers
+  makes it monotonically *slower* — the same 155U was fastest at `concurrency=1`
+  for JSON validation and 2× slower at `concurrency=14`.
+
+> **Heads-up on hybrid CPUs** (Intel 12th gen+, Apple Silicon) and shared CI
+> runners: `os.cpus().length` counts efficiency/low-power cores and Hyper-Threading
+> siblings as equal to performance cores, so the `CPUs * 0.75` default can overshoot
+> the real optimum on big or heterogeneous machines. The default is safe everywhere
+> (it never breaks, and small machines / 2-core CI runners land on 1-2 workers
+> automatically), but if you run heavy builds on many-core hardware it is worth
+> setting `concurrency` explicitly after a quick measurement.
 
 Run your own baseline and read the full analysis in [`benchmarks/README.md`](https://github.com/dshovchko/gulp-chokeless/blob/main/benchmarks/README.md):
 
@@ -216,7 +233,7 @@ When initializing `gulpChokelessPool(options)`, you can pass:
 | `workerOptions`| `object` | `{}` | An object containing configs grouped by tool (passed directly to the worker). |
 | `onStats`| `function` | `undefined` | Optional callback invoked with per-worker load stats each time a stream finishes. Enables [Worker Stats](#worker-stats). |
 
-> **Note on `concurrency`:** You can specify more workers than your machine has CPU cores—nothing will break and the pipeline will still execute successfully. However, doing so will likely slow down your task due to the extra processing overhead of managing those extra workers and context switching. By default, the auto mode dynamically sets concurrency to 75% of your available logical cores (but never less than 1).
+> **Note on `concurrency`:** You can specify more workers than your machine has CPU cores—nothing will break and the pipeline will still execute successfully. However, doing so will likely slow down your task due to the extra processing overhead of managing those extra workers and context switching. By default, the auto mode dynamically sets concurrency to 75% of your available logical cores (but never less than 1). The best value depends on how heavy your transform is — see [Choosing `concurrency`](#benchmarks) for light-vs-heavy guidance and notes on hybrid CPUs.
 
 ## Worker Stats
 
