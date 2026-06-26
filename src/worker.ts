@@ -5,6 +5,11 @@ let currentHandler: any = null;
 let initPromise: Promise<any> | null = null;
 let lastWorkerPath: string | null = null;
 
+// Reused across every task: stateless codecs are safe to share and avoid a
+// per-file allocation on the worker hot path.
+const decoder = new TextDecoder('utf-8');
+const encoder = new TextEncoder();
+
 /**
  * Loads a specified user-provided processor module dynamically.
  * @param processorPath - The absolute path or file URL of the custom worker execution script.
@@ -73,13 +78,18 @@ function handleInitMessage(message: any): void {
 
 function processTaskResult(res: any, sourceMap: boolean): void {
   if (!res) {
-    parentPort!.postMessage({result: '', imports: []});
+    const empty = new Uint8Array(0);
+    parentPort!.postMessage({result: empty.buffer, imports: []}, [empty.buffer]);
     return;
   }
 
   const resultString = res.result || res.css || res.code || (typeof res === 'string' ? res : '');
+  // Encode the result once and transfer its exact-sized backing buffer to the
+  // main thread (zero-copy): the parent wraps it with Buffer.from, sharing the
+  // memory instead of re-serializing the string through structured clone.
+  const bytes = encoder.encode(resultString);
   const obj: any = {
-    result: resultString,
+    result: bytes.buffer,
     imports: res.imports || []
   };
 
@@ -91,7 +101,7 @@ function processTaskResult(res: any, sourceMap: boolean): void {
     obj.sourcemap = typeof res.map === 'string' ? JSON.parse(res.map) : res.map;
   }
 
-  parentPort!.postMessage(obj);
+  parentPort!.postMessage(obj, [bytes.buffer]);
 }
 
 async function handleTaskMessage(message: any): Promise<void> {
@@ -111,7 +121,6 @@ async function handleTaskMessage(message: any): Promise<void> {
   }
 
   const view = new Uint8Array(sab);
-  const decoder = new TextDecoder('utf-8');
   const str = decoder.decode(view);
 
   if (!currentHandler) {
