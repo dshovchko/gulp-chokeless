@@ -16,18 +16,22 @@ const encoder = new TextEncoder();
 /**
  * Recursively freezes an object graph so cached, cross-task-shared state
  * (currently {@link currentWorkerOptions}) can't be mutated by a processor.
- * Guards against cycles via `seen` so a self-referencing options object can't
- * cause infinite recursion.
+ * `seen` is purely a cycle guard (not a "skip already-frozen" check): a child
+ * object can arrive already frozen by the caller while its own children are
+ * still mutable, so recursion must continue regardless of the parent's frozen
+ * state -- only re-visiting the same object is skipped.
  * @param value - The value to freeze in place.
- * @param seen - Objects already frozen in this call tree (cycle guard).
+ * @param seen - Objects already visited in this call tree (cycle guard).
  */
 function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
-  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
-  seen.add(value);
-  Object.freeze(value);
-  for (const key of Object.getOwnPropertyNames(value)) {
-    const child = (value as any)[key];
-    if (child !== null && typeof child === 'object' && !seen.has(child)) {
+  if (value === null || typeof value !== 'object') return value;
+  const obj = value as unknown as object;
+  if (seen.has(obj)) return value;
+  seen.add(obj);
+  if (!Object.isFrozen(obj)) Object.freeze(obj);
+  for (const key of Reflect.ownKeys(obj)) {
+    const child = (obj as any)[key];
+    if (child !== null && typeof child === 'object') {
       deepFreeze(child, seen);
     }
   }
@@ -134,6 +138,13 @@ function toTransferableBytes(value: any): Uint8Array {
     // exact-sized copy here (always ArrayBuffer-backed, even when the source
     // view is backed by a SharedArrayBuffer).
     return Uint8Array.prototype.slice.call(value);
+  }
+  if (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer) {
+    // A raw SharedArrayBuffer result (not wrapped in a Uint8Array) must also
+    // be copied into a private ArrayBuffer: it isn't Transferable, and
+    // wrapping it as-is on the main thread would share memory instead of
+    // returning a private copy.
+    return new Uint8Array(value).slice();
   }
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   return encoder.encode(String(value ?? ''));

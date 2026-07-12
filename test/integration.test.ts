@@ -279,4 +279,17 @@ describe('Integration with Worker Threads', () => {
     expect(out[0].contents).toEqual(expected);
     expect(out[0].extname).toBe('.bin');
   });
+
+  it('14. Copies a raw (non-view) SharedArrayBuffer result instead of stringifying it', async () => {
+    const rawSabWorkerPath = path.resolve(import.meta.dirname, 'dummy-raw-sab-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: rawSabWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('irrelevant'), path: '/r.bin' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    const expected = Buffer.from([0x41, 0xFF, 0x00, 0x42]);
+    expect(out[0].contents).toEqual(expected);
+    expect(out[0].extname).toBe('.bin');
+  });
 });
