@@ -239,4 +239,44 @@ describe('Integration with Worker Threads', () => {
     expect(out[0].contents).toEqual(expected);
     expect(out[0].extname).toBe('.bin');
   });
+
+  it('12. Deep-freezes cached workerOptions so a processor cannot leak mutations (incl. nested) across files', async () => {
+    const mutateWorkerPath = path.resolve(import.meta.dirname, 'dummy-mutate-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: mutateWorkerPath, concurrency: 1 });
+    const stream = pool({ workerOptions: { suffix: '-ORIGINAL', nested: { list: ['a'] } } });
+    const files = [
+      new MockFile({ contents: Buffer.from('F1'), path: '/f1.less' }),
+      new MockFile({ contents: Buffer.from('F2'), path: '/f2.less' }),
+    ];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(2);
+
+    for (const file of out) {
+      const report = JSON.parse(file.contents!.toString());
+      // Array methods (push) always throw on a frozen array regardless of
+      // strict/sloppy mode; a plain top-level assignment on a frozen object
+      // only throws in strict mode and silently no-ops otherwise (module-
+      // system dependent) -- so assert the mutation had no lasting EFFECT
+      // (the real invariant we care about) rather than asserting it threw.
+      expect(report.nestedThrew).toBe(true);
+      // Regardless of processing order, every file must see the pristine
+      // options -- no mutation from one file's attempt should leak into another.
+      expect(report.suffix).toBe('-ORIGINAL');
+      expect(report.listLength).toBe(1);
+    }
+  });
+
+  it('13. Copies SharedArrayBuffer-backed results into a private ArrayBuffer', async () => {
+    const sharedWorkerPath = path.resolve(import.meta.dirname, 'dummy-shared-buffer-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: sharedWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('irrelevant'), path: '/s.bin' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    const expected = Buffer.from([0x00, 0xFF, 0x10, 0xFE, 0x01]);
+    expect(out[0].contents).toEqual(expected);
+    expect(out[0].extname).toBe('.bin');
+  });
 });

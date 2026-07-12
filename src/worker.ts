@@ -14,6 +14,27 @@ const decoder = new TextDecoder('utf-8');
 const encoder = new TextEncoder();
 
 /**
+ * Recursively freezes an object graph so cached, cross-task-shared state
+ * (currently {@link currentWorkerOptions}) can't be mutated by a processor.
+ * Guards against cycles via `seen` so a self-referencing options object can't
+ * cause infinite recursion.
+ * @param value - The value to freeze in place.
+ * @param seen - Objects already frozen in this call tree (cycle guard).
+ */
+function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  seen.add(value);
+  Object.freeze(value);
+  for (const key of Object.getOwnPropertyNames(value)) {
+    const child = (value as any)[key];
+    if (child !== null && typeof child === 'object' && !seen.has(child)) {
+      deepFreeze(child, seen);
+    }
+  }
+  return value;
+}
+
+/**
  * Loads a specified user-provided processor module dynamically.
  * @param processorPath - The absolute path or file URL of the custom worker execution script.
  * @returns The resolved, executable module handler.
@@ -36,11 +57,11 @@ function handleInitMessage(message: any): void {
 
   // Cache workerOptions here (per stream / per watch reconfig) so the task hot
   // path can read them locally instead of the main thread cloning them on every
-  // postMessage. Frozen because it is now reused across every task in the
-  // stream: previously each task got its own structured-cloned copy, so a
-  // processor mutating it couldn't affect subsequent files; freezing keeps
-  // that same no-cross-file-mutation guarantee for the cached object.
-  currentWorkerOptions = Object.freeze(opts.workerOptions || {});
+  // postMessage. Deep-frozen (cycle-safe) since it's reused across the whole
+  // stream now: a per-task clone used to stop a processor's mutation (incl.
+  // nested objects) from leaking into later files; freezing the whole graph
+  // preserves that guarantee for the cached object.
+  currentWorkerOptions = deepFreeze(opts.workerOptions || {});
 
   if (opts.workerPath && opts.workerPath !== lastWorkerPath) {
     lastWorkerPath = opts.workerPath;
@@ -100,13 +121,18 @@ function handleInitMessage(message: any): void {
 function toTransferableBytes(value: any): Uint8Array {
   if (typeof value === 'string') return encoder.encode(value);
   if (value instanceof Uint8Array) {
-    if (value.byteOffset === 0 && value.byteLength === value.buffer.byteLength) {
+    // A SharedArrayBuffer-backed view must always be copied: returning it
+    // as-is would let the main thread's Buffer.from wrap shared memory
+    // instead of a private copy, and it also isn't Transferable.
+    const isShared = typeof SharedArrayBuffer !== 'undefined' && value.buffer instanceof SharedArrayBuffer;
+    if (!isShared && value.byteOffset === 0 && value.byteLength === value.buffer.byteLength) {
       return value;
     }
     // Note: Buffer (a Uint8Array subclass) overrides .slice() to return a
     // VIEW into the same backing buffer instead of copying, so call the base
     // Uint8Array.prototype.slice explicitly to guarantee an independent,
-    // exact-sized copy here.
+    // exact-sized copy here (always ArrayBuffer-backed, even when the source
+    // view is backed by a SharedArrayBuffer).
     return Uint8Array.prototype.slice.call(value);
   }
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -115,10 +141,10 @@ function toTransferableBytes(value: any): Uint8Array {
 
 /**
  * Posts a message whose payload bytes live in `bytes.buffer`, transferring
- * that buffer (zero-copy) only when it is a real `ArrayBuffer`. A `Uint8Array`
- * returned by user code could theoretically be backed by a `SharedArrayBuffer`,
- * which is not `Transferable`; in that rare case structured clone copies the
- * data instead, which is still correct, just not zero-copy.
+ * that buffer (zero-copy) only when it is a real `ArrayBuffer`. Belt-and-
+ * suspenders: {@link toTransferableBytes} already guarantees an ArrayBuffer-
+ * backed result, but if it were ever handed a SharedArrayBuffer directly this
+ * still falls back to a normal (copying) postMessage instead of throwing.
  */
 function postWithBytes(obj: any, bytes: Uint8Array): void {
   const buffer = bytes.buffer;
