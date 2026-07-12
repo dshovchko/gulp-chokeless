@@ -20,6 +20,18 @@ const encoder = new TextEncoder();
  * object can arrive already frozen by the caller while its own children are
  * still mutable, so recursion must continue regardless of the parent's frozen
  * state -- only re-visiting the same object is skipped.
+ *
+ * Scope: `Object.freeze` blocks reassigning/adding/deleting a plain object's
+ * OWN properties, which covers the plain config objects/arrays `workerOptions`
+ * is expected to be built from (see the README example: `less`/`lightningcss`/
+ * `banner` config trees). It does NOT stop internal-slot mutation on exotic
+ * built-ins a processor might embed in there instead (e.g. `Map#set`,
+ * `Set#add`, `Date#setFullYear`, or writing to a `Buffer`/typed-array index) --
+ * those bypass ordinary property writes entirely, so freezing can't intercept
+ * them. Deliberately not cloning per task to close that narrower gap: doing so
+ * would reintroduce the full per-file clone cost this caching was added to
+ * eliminate (see the workerOptions-caching perf changes), for a shape of
+ * config this library doesn't otherwise expect.
  * @param value - The value to freeze in place.
  * @param seen - Objects already visited in this call tree (cycle guard).
  */
@@ -51,11 +63,6 @@ async function getHandler(processorPath: string): Promise<any> {
   return mod.default || mod;
 }
 
-/**
- * Re-reads worker options, invokes user-defined initializations or cache warm-ups,
- * and delegates success/failure directly to the parent stream orchestrator via port messaging.
- * @param message - Initialization payload dispatched from the `GulpChokelessPool`.
- */
 /**
  * Deep-freezes and caches `workerOptions` as {@link currentWorkerOptions}, used
  * by both the `init` broadcast and a per-task resync (see {@link handleTaskMessage}).
