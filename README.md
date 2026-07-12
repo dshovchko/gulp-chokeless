@@ -235,6 +235,8 @@ When initializing `gulpChokelessPool(options)`, you can pass:
 
 > **Note on `concurrency`:** You can specify more workers than your machine has CPU cores—nothing will break and the pipeline will still execute successfully. However, doing so will likely slow down your task due to the extra processing overhead of managing those extra workers and context switching. By default, the auto mode dynamically sets concurrency to 75% of your available logical cores (but never less than 1). The best value depends on how heavy your transform is — see [Choosing `concurrency`](#benchmarks) for light-vs-heavy guidance and notes on hybrid CPUs.
 
+> **Note on `workerOptions`:** Treat the `workerOptions` object your `process()` receives as **read-only**. It's shared (and deep-frozen) across every file in a stream for performance, so mutating it — including nested objects/arrays — either throws or silently no-ops depending on your worker module's strict-mode setting, and any change would otherwise leak into subsequent files. If you need per-file scratch state derived from it, copy what you need instead (as the LESS example above does: `Object.assign({}, workerOptions.less, { filename })`).
+
 ## Worker Stats
 
 For debugging worker code and tuning `concurrency`, you can opt into worker load statistics by passing an `onStats` callback. It receives how busy each worker thread was and how the work was distributed, so you can spot under-utilized pools or uneven load.

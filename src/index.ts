@@ -415,26 +415,50 @@ export class GulpChokelessPool {
     }
   }
 
+  /**
+   * Builds this stream's effective options, remembers them for mid-stream
+   * worker replacement, and broadcasts an `init` to every worker (refreshing
+   * caches / running the user's `init()` hook -- useful for watch mode).
+   *
+   * The broadcast unconditionally updates EVERY worker's cached
+   * `workerOptions` (see `cacheWorkerOptions` in worker.ts), including workers
+   * currently busy with another overlapping stream's task -- so this also
+   * invalidates {@link WorkerInfo.lastOptions} pool-wide. Without that, a busy
+   * worker's NEXT task from an unrelated, still-in-flight stream could wrongly
+   * skip re-sending its own options (lastOptions would still reference-match
+   * that task's options even though this broadcast already clobbered what the
+   * worker actually has cached), running with the wrong workerOptions.
+   * @param streamOptions - Per-stream overrides passed to the plugin factory.
+   * @returns The merged, effective options for this stream.
+   */
+  private prepareStreamOptions(streamOptions: any): any {
+    const currentOptions = Object.assign({
+      workerOptions: {},
+      sourcemap: false
+    }, this.baseOptions, streamOptions);
+
+    // Lock workerPath to the originally pre-warmed module, ignoring any stream overrides
+    currentOptions.workerPath = this.baseOptions.workerPath;
+
+    // onStats is a pool-only callback; strip it so a stray per-stream override
+    // never reaches postMessage (a function would throw DataCloneError).
+    delete currentOptions.onStats;
+
+    // Remember these options so a worker replaced mid-stream is initialized
+    // to the same state as the rest of the pool.
+    this.lastInitOptions = currentOptions;
+
+    this.workers.forEach((w) => {
+      w.lastOptions = undefined;
+      w.worker.postMessage({type: 'init', options: currentOptions});
+    });
+
+    return currentOptions;
+  }
+
   public getPlugin(): (streamOptions?: any) => ConcurrentTransform {
     return (streamOptions: any = {}): ConcurrentTransform => {
-      const currentOptions = Object.assign({
-        workerOptions: {},
-        sourcemap: false
-      }, this.baseOptions, streamOptions);
-
-      // Lock workerPath to the originally pre-warmed module, ignoring any stream overrides
-      currentOptions.workerPath = this.baseOptions.workerPath;
-
-      // onStats is a pool-only callback; strip it so a stray per-stream override
-      // never reaches postMessage (a function would throw DataCloneError).
-      delete currentOptions.onStats;
-
-      // Remember these options so a worker replaced mid-stream is initialized
-      // to the same state as the rest of the pool.
-      this.lastInitOptions = currentOptions;
-
-      // Ensure workers reset their caches and receive the latest options per stream (useful for watch mode)
-      this.workers.forEach((w) => w.worker.postMessage({type: 'init', options: currentOptions}));
+      const currentOptions = this.prepareStreamOptions(streamOptions);
 
       this.beginStream();
       const session = this.startStatsSession();

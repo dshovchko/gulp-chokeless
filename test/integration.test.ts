@@ -370,4 +370,56 @@ describe('Integration with Worker Threads', () => {
     expect(out[0].contents).toEqual(expected);
     expect(out[0].extname).toBe('.bin');
   });
+
+  it('19. A busy worker\'s cache clobbered by an overlapping stream\'s init broadcast still gets resynced', async () => {
+    // Regression test: the init broadcast alone updates a worker's cached
+    // workerOptions (cacheWorkerOptions in worker.ts) regardless of whether
+    // that worker is busy -- so lastOptions bookkeeping must be invalidated by
+    // the broadcast itself, not just by task dispatch. With a single worker,
+    // this isolates the scenario: task A1 dispatched (worker busy) -> while
+    // busy, stream B is created (broadcasting init(B) to the SAME worker,
+    // clobbering its cache) but given NO files yet, so it can't itself
+    // dispatch a task that would incidentally fix up lastOptions -> stream A's
+    // task A2 is the ONLY thing dispatched next. Without invalidating
+    // lastOptions on the broadcast, A2 would wrongly skip re-sending stream
+    // A's options once the worker frees up.
+    const pool = createGulpWorkerPool({ workerPath: dummyWorkerPath, concurrency: 1 });
+
+    const streamA = pool({ workerOptions: { suffix: '-A' } });
+    const resultsA: MockFile[] = [];
+    streamA.on('data', (f: MockFile) => resultsA.push(f));
+    const doneA = new Promise((resolve, reject) => {
+      streamA.on('end', resolve);
+      streamA.on('error', reject);
+    });
+
+    // Dispatches immediately: the only worker is idle.
+    streamA.write(new MockFile({ contents: Buffer.from('A1'), path: '/a1.less' }));
+
+    // While A1 is still in flight (10ms delay in dummy-worker.js), start an
+    // overlapping stream B: its init broadcast lands on the SAME (busy)
+    // worker and clobbers its cached workerOptions. No file is written to it
+    // yet, so it cannot dispatch a task of its own in between.
+    const streamB = pool({ workerOptions: { suffix: '-B' } });
+
+    streamA.write(new MockFile({ contents: Buffer.from('A2'), path: '/a2.less' }));
+    streamA.end();
+    await doneA;
+
+    expect(resultsA).toHaveLength(2);
+    for (const file of resultsA) expect(file.contents?.toString()).toMatch(/-A$/);
+
+    // Close out stream B cleanly.
+    const resultsB: MockFile[] = [];
+    streamB.on('data', (f: MockFile) => resultsB.push(f));
+    const doneB = new Promise((resolve, reject) => {
+      streamB.on('end', resolve);
+      streamB.on('error', reject);
+    });
+    streamB.write(new MockFile({ contents: Buffer.from('B1'), path: '/b1.less' }));
+    streamB.end();
+    await doneB;
+    expect(resultsB).toHaveLength(1);
+    expect(resultsB[0].contents?.toString()).toMatch(/-B$/);
+  });
 });
