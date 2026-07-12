@@ -165,6 +165,19 @@ export class GulpChokelessPool {
     cb(new GulpWorkerError(err));
   }
 
+  /**
+   * A legitimate task response always carries `result` (success, incl. an
+   * empty ArrayBuffer) or `error` (failure). User process() code shares the
+   * same worker thread and can reach `parentPort` directly (e.g. a library
+   * posting its own progress/debug messages); this guards against treating a
+   * stray, differently-shaped message as this slot's task response, which
+   * would resolve/reject the wrong call and desync the slot from the real
+   * response that follows.
+   */
+  private isTaskResponse(data: any): boolean {
+    return data !== null && data !== undefined && (data.result !== undefined || data.error !== undefined);
+  }
+
   private createWorker(index: number): WorkerInfo {
     const worker = new Worker(path.join(__dirname, 'worker.js'));
     worker.unref();
@@ -181,6 +194,8 @@ export class GulpChokelessPool {
         if (data.error) throw new GulpWorkerError(`Worker initialization failed: ${data.error?.message || data.error}`);
         return;
       }
+
+      if (!this.isTaskResponse(data)) return;
 
       // Responses are routed by worker instance: the pool dispatches at most one
       // task per worker, so this slot's pending callback is the right target.

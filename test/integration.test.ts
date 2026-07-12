@@ -327,4 +327,19 @@ describe('Integration with Worker Threads', () => {
     for (const file of outA) expect(file.contents?.toString()).toMatch(/-A$/);
     for (const file of outB) expect(file.contents?.toString()).toMatch(/-B$/);
   });
+
+  it('16. Ignores a stray, non-task-shaped message posted directly on parentPort by user code', async () => {
+    const strayWorkerPath = path.resolve(import.meta.dirname, 'dummy-stray-message-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: strayWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [
+      new MockFile({ contents: Buffer.from('X'), path: '/x.less' }),
+      new MockFile({ contents: Buffer.from('Y'), path: '/y.less' }),
+    ];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(2);
+    const results = out.map(f => f.contents?.toString()).sort();
+    expect(results).toEqual(['X-DONE', 'Y-DONE']);
+  });
 });
