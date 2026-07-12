@@ -56,16 +56,29 @@ async function getHandler(processorPath: string): Promise<any> {
  * and delegates success/failure directly to the parent stream orchestrator via port messaging.
  * @param message - Initialization payload dispatched from the `GulpChokelessPool`.
  */
+/**
+ * Deep-freezes and caches `workerOptions` as {@link currentWorkerOptions}, used
+ * by both the `init` broadcast and a per-task resync (see {@link handleTaskMessage}).
+ * @param opts - The options payload (`{workerPath, workerOptions, ...}`) to cache from.
+ */
+function cacheWorkerOptions(opts: any): void {
+  // Deep-frozen (cycle-safe) since it's reused across every task that shares
+  // this reference: a per-task clone used to stop a processor's mutation
+  // (incl. nested objects) from leaking into later files; freezing the whole
+  // graph preserves that guarantee for the cached object.
+  currentWorkerOptions = deepFreeze(opts.workerOptions || {});
+}
+
 function handleInitMessage(message: any): void {
   const opts = message.options || {};
 
   // Cache workerOptions here (per stream / per watch reconfig) so the task hot
-  // path can read them locally instead of the main thread cloning them on every
-  // postMessage. Deep-frozen (cycle-safe) since it's reused across the whole
-  // stream now: a per-task clone used to stop a processor's mutation (incl.
-  // nested objects) from leaking into later files; freezing the whole graph
-  // preserves that guarantee for the cached object.
-  currentWorkerOptions = deepFreeze(opts.workerOptions || {});
+  // path can read them locally instead of the main thread cloning them on
+  // every postMessage. This also runs the user's init() hook pool-wide per
+  // stream; the pool separately resyncs a task's own options if a DIFFERENT
+  // stream's task lands on this worker in between (see handleTaskMessage), so
+  // this broadcast racing an overlapping stream cannot misapply options.
+  cacheWorkerOptions(opts);
 
   if (opts.workerPath && opts.workerPath !== lastWorkerPath) {
     lastWorkerPath = opts.workerPath;
@@ -196,7 +209,14 @@ function processTaskResult(res: any, sourceMap: boolean): void {
 }
 
 async function handleTaskMessage(message: any): Promise<void> {
-  const {sab, filename, sourceMap} = message;
+  const {sab, filename, sourceMap, options} = message;
+
+  // The pool only attaches `options` when they differ from what it last sent
+  // THIS worker (see GulpChokelessPool.executeTask): this is what keeps two
+  // overlapping streams (e.g. gulp.parallel) with different workerOptions
+  // correct even though they may share this worker over time — resyncing here,
+  // tied to this exact task, cannot race an unrelated stream's init broadcast.
+  if (options) cacheWorkerOptions(options);
 
   if (initPromise) {
     try {

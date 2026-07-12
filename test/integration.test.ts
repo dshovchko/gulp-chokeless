@@ -292,4 +292,39 @@ describe('Integration with Worker Threads', () => {
     expect(out[0].contents).toEqual(expected);
     expect(out[0].extname).toBe('.bin');
   });
+
+  it('15. Keeps two overlapping streams with different workerOptions isolated on a shared pool', async () => {
+    // Regression test: workerOptions caching (see cacheWorkerOptions in
+    // worker.ts) must never let a busy worker's cached options be clobbered by
+    // an overlapping stream's init broadcast. With only 2 workers and 3 files
+    // per stream, workers are guaranteed to be reused across streams A and B.
+    const pool = createGulpWorkerPool({ workerPath: dummyWorkerPath, concurrency: 2 });
+
+    const streamA = pool({ workerOptions: { suffix: '-A' } });
+    const streamB = pool({ workerOptions: { suffix: '-B' } });
+
+    const filesA = [
+      new MockFile({ contents: Buffer.from('A1'), path: '/a1.less' }),
+      new MockFile({ contents: Buffer.from('A2'), path: '/a2.less' }),
+      new MockFile({ contents: Buffer.from('A3'), path: '/a3.less' }),
+    ];
+    const filesB = [
+      new MockFile({ contents: Buffer.from('B1'), path: '/b1.less' }),
+      new MockFile({ contents: Buffer.from('B2'), path: '/b2.less' }),
+      new MockFile({ contents: Buffer.from('B3'), path: '/b3.less' }),
+    ];
+
+    // Kick off both streams without awaiting either first, so their tasks
+    // genuinely interleave across the same 2 workers (dummy-worker.js's 10ms
+    // artificial delay widens the overlap window).
+    const [outA, outB] = await Promise.all([
+      runStream(streamA, filesA),
+      runStream(streamB, filesB),
+    ]);
+
+    expect(outA).toHaveLength(3);
+    expect(outB).toHaveLength(3);
+    for (const file of outA) expect(file.contents?.toString()).toMatch(/-A$/);
+    for (const file of outB) expect(file.contents?.toString()).toMatch(/-B$/);
+  });
 });

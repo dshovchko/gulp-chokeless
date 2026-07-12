@@ -64,6 +64,15 @@ interface WorkerInfo {
    * counting work done before a mid-stream crash.
    */
   tasksProcessed: number;
+  /**
+   * Reference to the options object last attached to a task message actually
+   * dispatched to this worker (not the broadcast `init` message, which may
+   * race an overlapping stream's tasks on a busy worker). Options are only
+   * re-sent with a task when this differs from the task's own options object,
+   * so the pool never has to trust which stream's `init` last "won" the race
+   * on a shared worker — correctness follows real dispatch order instead.
+   */
+  lastOptions?: any;
 }
 
 /**
@@ -311,14 +320,28 @@ export class GulpChokelessPool {
     }
   }
 
-  private executeTask(workerInfo: WorkerInfo, task: {sab: SharedArrayBuffer, filename: string, sourceMap: boolean, cb: TaskCallback}): void {
+  private executeTask(workerInfo: WorkerInfo, task: {sab: SharedArrayBuffer, filename: string, sourceMap: boolean, options: any, cb: TaskCallback}): void {
     workerInfo.callback = task.cb;
     try {
-      workerInfo.worker.postMessage({
+      const msg: any = {
         sab: task.sab,
         filename: task.filename,
         sourceMap: task.sourceMap
-      });
+      };
+      // Only attach (and thus clone across the thread boundary) options when
+      // they differ from what this specific worker was last dispatched: two
+      // overlapping streams (e.g. gulp.parallel) with different workerOptions
+      // can share this pool, and a worker may alternate between their tasks in
+      // whatever order the main thread actually dispatches them. Comparing by
+      // reference here — tied to real dispatch order — is what keeps that
+      // correct; the eager `init` broadcast alone cannot, since it fires
+      // regardless of whether a targeted worker is currently busy with
+      // another stream's task.
+      if (workerInfo.lastOptions !== task.options) {
+        msg.options = task.options;
+        workerInfo.lastOptions = task.options;
+      }
+      workerInfo.worker.postMessage(msg);
     } catch (err: any) {
       workerInfo.callback = null;
 
@@ -328,7 +351,7 @@ export class GulpChokelessPool {
     }
   }
 
-  private processTask(buffer: Buffer, filename: string, sourceMap: boolean): Promise<any> {
+  private processTask(buffer: Buffer, filename: string, sourceMap: boolean, options: any): Promise<any> {
     const sab = new SharedArrayBuffer(buffer.length);
     const view = new Uint8Array(sab);
     view.set(buffer);
@@ -338,6 +361,7 @@ export class GulpChokelessPool {
         sab,
         filename,
         sourceMap,
+        options,
         cb: (err: Error | null, res: any): void => {
           err ? reject(err) : resolve(res);
         }
@@ -412,7 +436,7 @@ export class GulpChokelessPool {
           if (file.isStream()) return cb(new GulpWorkerError('Streaming not supported'));
 
           const useSourceMap = !!(file.sourceMap || currentOptions.sourcemap);
-          this.processTask(file.contents, file.path, useSourceMap)
+          this.processTask(file.contents, file.path, useSourceMap, currentOptions)
             .then((res: any) => this.handleTaskSuccess(file, res, cb))
             .catch((err: any) => this.handleTaskError(err, file, currentOptions, cb));
         },
