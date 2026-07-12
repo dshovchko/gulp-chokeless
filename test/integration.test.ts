@@ -226,4 +226,17 @@ describe('Integration with Worker Threads', () => {
     expect(out).toHaveLength(1);
     expect(out[0].contents?.toString()).toBe('Y-Z');
   });
+
+  it('11. Preserves binary (non-UTF-8) results returned as a Buffer without corruption', async () => {
+    const binaryWorkerPath = path.resolve(import.meta.dirname, 'dummy-binary-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: binaryWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('irrelevant'), path: '/b.bin' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    const expected = Buffer.from([0x00, 0xFF, 0x10, 0xFE, 0x7F, 0x80, 0x01]);
+    expect(out[0].contents).toEqual(expected);
+    expect(out[0].extname).toBe('.bin');
+  });
 });

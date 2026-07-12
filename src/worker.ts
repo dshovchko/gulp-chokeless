@@ -84,18 +84,61 @@ function handleInitMessage(message: any): void {
   }
 }
 
+/**
+ * Converts a processor's result into bytes safe to transfer to the main
+ * thread. Strings are encoded once (always producing a freshly-allocated,
+ * exact-sized buffer, safe to transfer). Binary results (`Buffer`/`Uint8Array`/
+ * `ArrayBuffer`) are passed through zero-copy when the view owns its entire
+ * backing buffer; a view into a larger/shared buffer (e.g. a `Buffer` slice
+ * from Node's shared allocation pool) is copied first, since transferring the
+ * whole backing buffer would detach memory other data may still be using.
+ * @param value - The raw result value returned by the user's `process()`.
+ */
+function toTransferableBytes(value: any): Uint8Array {
+  if (typeof value === 'string') return encoder.encode(value);
+  if (value instanceof Uint8Array) {
+    if (value.byteOffset === 0 && value.byteLength === value.buffer.byteLength) {
+      return value;
+    }
+    // Note: Buffer (a Uint8Array subclass) overrides .slice() to return a
+    // VIEW into the same backing buffer instead of copying, so call the base
+    // Uint8Array.prototype.slice explicitly to guarantee an independent,
+    // exact-sized copy here.
+    return Uint8Array.prototype.slice.call(value);
+  }
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return encoder.encode(String(value ?? ''));
+}
+
+/**
+ * Posts a message whose payload bytes live in `bytes.buffer`, transferring
+ * that buffer (zero-copy) only when it is a real `ArrayBuffer`. A `Uint8Array`
+ * returned by user code could theoretically be backed by a `SharedArrayBuffer`,
+ * which is not `Transferable`; in that rare case structured clone copies the
+ * data instead, which is still correct, just not zero-copy.
+ */
+function postWithBytes(obj: any, bytes: Uint8Array): void {
+  const buffer = bytes.buffer;
+  if (buffer instanceof ArrayBuffer) {
+    parentPort!.postMessage(obj, [buffer]);
+  } else {
+    parentPort!.postMessage(obj);
+  }
+}
+
 function processTaskResult(res: any, sourceMap: boolean): void {
   if (!res) {
     const empty = new Uint8Array(0);
-    parentPort!.postMessage({result: empty.buffer, imports: []}, [empty.buffer]);
+    postWithBytes({result: empty.buffer, imports: []}, empty);
     return;
   }
 
-  const resultString = res.result || res.css || res.code || (typeof res === 'string' ? res : '');
-  // Encode the result once and transfer its exact-sized backing buffer to the
-  // main thread (zero-copy): the parent wraps it with Buffer.from, sharing the
-  // memory instead of re-serializing the string through structured clone.
-  const bytes = encoder.encode(resultString);
+  const rawResult = res.result || res.css || res.code || (typeof res === 'string' ? res : '');
+  // Encode/normalize the result once and transfer its exact-sized backing
+  // buffer to the main thread (zero-copy): the parent wraps it with
+  // Buffer.from, sharing the memory instead of re-serializing through
+  // structured clone.
+  const bytes = toTransferableBytes(rawResult);
   const obj: any = {
     result: bytes.buffer,
     imports: res.imports || []
@@ -109,7 +152,7 @@ function processTaskResult(res: any, sourceMap: boolean): void {
     obj.sourcemap = typeof res.map === 'string' ? JSON.parse(res.map) : res.map;
   }
 
-  parentPort!.postMessage(obj, [bytes.buffer]);
+  postWithBytes(obj, bytes);
 }
 
 async function handleTaskMessage(message: any): Promise<void> {
