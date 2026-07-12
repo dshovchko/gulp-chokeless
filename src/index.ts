@@ -166,16 +166,19 @@ export class GulpChokelessPool {
   }
 
   /**
-   * A legitimate task response always carries `result` (success, incl. an
-   * empty ArrayBuffer) or `error` (failure). User process() code shares the
-   * same worker thread and can reach `parentPort` directly (e.g. a library
-   * posting its own progress/debug messages); this guards against treating a
-   * stray, differently-shaped message as this slot's task response, which
-   * would resolve/reject the wrong call and desync the slot from the real
-   * response that follows.
+   * A legitimate task response always carries `result` as an `ArrayBuffer`
+   * (success, incl. an empty one) or `error` as an object with a string
+   * `message` (failure) -- the exact shapes worker.ts ever sends. User
+   * process() code shares the same worker thread and can reach `parentPort`
+   * directly (e.g. a library posting its own progress/debug messages);
+   * validating the shape (not just key presence) guards against a stray
+   * message that happens to reuse `result`/`error` as a property name too,
+   * which would otherwise resolve/reject the wrong call and desync the slot
+   * from the real response that follows.
    */
   private isTaskResponse(data: any): boolean {
-    return data !== null && data !== undefined && (data.result !== undefined || data.error !== undefined);
+    if (data === null || data === undefined) return false;
+    return (data.result instanceof ArrayBuffer) || (!!data.error && typeof data.error.message === 'string');
   }
 
   private createWorker(index: number): WorkerInfo {

@@ -342,4 +342,32 @@ describe('Integration with Worker Threads', () => {
     const results = out.map(f => f.contents?.toString()).sort();
     expect(results).toEqual(['X-DONE', 'Y-DONE']);
   });
+
+  it('17. Ignores a stray message even when it reuses `result` as a property name', async () => {
+    const strayWorkerPath = path.resolve(import.meta.dirname, 'dummy-stray-result-key-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: strayWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [
+      new MockFile({ contents: Buffer.from('X'), path: '/x.less' }),
+      new MockFile({ contents: Buffer.from('Y'), path: '/y.less' }),
+    ];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(2);
+    const results = out.map(f => f.contents?.toString()).sort();
+    expect(results).toEqual(['X-DONE', 'Y-DONE']);
+  });
+
+  it('18. Normalizes a non-Uint8Array typed-array result (Uint16Array) instead of stringifying it', async () => {
+    const typedArrayWorkerPath = path.resolve(import.meta.dirname, 'dummy-typed-array-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: typedArrayWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('irrelevant'), path: '/t.bin' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    const expected = Buffer.from(new Uint16Array([0x0041, 0x00FF, 0x1234]).buffer);
+    expect(out[0].contents).toEqual(expected);
+    expect(out[0].extname).toBe('.bin');
+  });
 });

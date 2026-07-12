@@ -144,6 +144,14 @@ function handleInitMessage(message: any): void {
  */
 function toTransferableBytes(value: any): Uint8Array {
   if (typeof value === 'string') return encoder.encode(value);
+  // Normalize any other ArrayBufferView (Uint16Array, Int32Array, DataView,
+  // Uint8ClampedArray, ...) to a Uint8Array over the SAME bytes (a view, not a
+  // copy) so it's handled as binary below instead of falling through to
+  // String(value) and getting UTF-8 encoded -- structured clone used to carry
+  // these correctly pre-H5; this restores that for the zero-copy path too.
+  if (ArrayBuffer.isView(value) && !(value instanceof Uint8Array)) {
+    value = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
   if (value instanceof Uint8Array) {
     // A SharedArrayBuffer-backed view must always be copied: returning it
     // as-is would let the main thread's Buffer.from wrap shared memory
