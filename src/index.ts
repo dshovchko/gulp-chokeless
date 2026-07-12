@@ -281,8 +281,9 @@ export class GulpChokelessPool {
 
     // The slot is idle again: ensure its index appears exactly once in the
     // free stack (a worker that crashed while idle was already listed).
-    const freePos = this.freeWorkers.indexOf(idx);
-    if (freePos !== -1) this.freeWorkers.splice(freePos, 1);
+    // Cold path (worker replacement only): filter to fully de-dup rather than
+    // removing a single occurrence, in case duplicate signals ever queue it twice.
+    this.freeWorkers = this.freeWorkers.filter((i) => i !== idx);
     this.freeWorkers.push(idx);
 
     // While a stream is active, match the replacement to the rest of the pool

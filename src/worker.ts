@@ -36,8 +36,11 @@ function handleInitMessage(message: any): void {
 
   // Cache workerOptions here (per stream / per watch reconfig) so the task hot
   // path can read them locally instead of the main thread cloning them on every
-  // postMessage.
-  currentWorkerOptions = opts.workerOptions || {};
+  // postMessage. Frozen because it is now reused across every task in the
+  // stream: previously each task got its own structured-cloned copy, so a
+  // processor mutating it couldn't affect subsequent files; freezing keeps
+  // that same no-cross-file-mutation guarantee for the cached object.
+  currentWorkerOptions = Object.freeze(opts.workerOptions || {});
 
   if (opts.workerPath && opts.workerPath !== lastWorkerPath) {
     lastWorkerPath = opts.workerPath;
