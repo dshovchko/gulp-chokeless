@@ -97,8 +97,8 @@ Full results across Intel Core Ultra 7 155U and AMD EPYC 9645 — see [`benchmar
 
 | Approach | Mean time | vs. single-thread Gulp |
 |---|---|---|
-| `gulp` single-thread (inline `Transform`) | 10.5 s | baseline |
-| **`gulp` + `gulp-chokeless`** | **2.0 s** | **5.2× faster** |
+| `gulp` single-thread (inline `Transform`) | 10.2 s | baseline |
+| **`gulp` + `gulp-chokeless`** | **2.0 s** | **5.1× faster** |
 
 At `concurrency=1` the two variants tie across every scenario — `gulp-chokeless`
 adds no measurable overhead, so it is a safe drop-in even for builds that
