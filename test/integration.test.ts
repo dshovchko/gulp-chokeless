@@ -226,4 +226,200 @@ describe('Integration with Worker Threads', () => {
     expect(out).toHaveLength(1);
     expect(out[0].contents?.toString()).toBe('Y-Z');
   });
+
+  it('11. Preserves binary (non-UTF-8) results returned as a Buffer without corruption', async () => {
+    const binaryWorkerPath = path.resolve(import.meta.dirname, 'dummy-binary-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: binaryWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('irrelevant'), path: '/b.bin' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    const expected = Buffer.from([0x00, 0xFF, 0x10, 0xFE, 0x7F, 0x80, 0x01]);
+    expect(out[0].contents).toEqual(expected);
+    expect(out[0].extname).toBe('.bin');
+  });
+
+  it('12. Deep-freezes cached workerOptions so a processor cannot leak mutations (incl. nested) across files', async () => {
+    const mutateWorkerPath = path.resolve(import.meta.dirname, 'dummy-mutate-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: mutateWorkerPath, concurrency: 1 });
+    const stream = pool({ workerOptions: { suffix: '-ORIGINAL', nested: { list: ['a'] } } });
+    const files = [
+      new MockFile({ contents: Buffer.from('F1'), path: '/f1.less' }),
+      new MockFile({ contents: Buffer.from('F2'), path: '/f2.less' }),
+    ];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(2);
+
+    for (const file of out) {
+      const report = JSON.parse(file.contents!.toString());
+      // Array methods (push) always throw on a frozen array regardless of
+      // strict/sloppy mode; a plain top-level assignment on a frozen object
+      // only throws in strict mode and silently no-ops otherwise (module-
+      // system dependent) -- so assert the mutation had no lasting EFFECT
+      // (the real invariant we care about) rather than asserting it threw.
+      expect(report.nestedThrew).toBe(true);
+      // Regardless of processing order, every file must see the pristine
+      // options -- no mutation from one file's attempt should leak into another.
+      expect(report.suffix).toBe('-ORIGINAL');
+      expect(report.listLength).toBe(1);
+    }
+  });
+
+  it('13. Copies SharedArrayBuffer-backed results into a private ArrayBuffer', async () => {
+    const sharedWorkerPath = path.resolve(import.meta.dirname, 'dummy-shared-buffer-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: sharedWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('irrelevant'), path: '/s.bin' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    const expected = Buffer.from([0x00, 0xFF, 0x10, 0xFE, 0x01]);
+    expect(out[0].contents).toEqual(expected);
+    expect(out[0].extname).toBe('.bin');
+  });
+
+  it('14. Copies a raw (non-view) SharedArrayBuffer result instead of stringifying it', async () => {
+    const rawSabWorkerPath = path.resolve(import.meta.dirname, 'dummy-raw-sab-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: rawSabWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('irrelevant'), path: '/r.bin' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    const expected = Buffer.from([0x41, 0xFF, 0x00, 0x42]);
+    expect(out[0].contents).toEqual(expected);
+    expect(out[0].extname).toBe('.bin');
+  });
+
+  it('15. Keeps two overlapping streams with different workerOptions isolated on a shared pool', async () => {
+    // Regression test: workerOptions caching (see cacheWorkerOptions in
+    // worker.ts) must never let a busy worker's cached options be clobbered by
+    // an overlapping stream's init broadcast. With only 2 workers and 3 files
+    // per stream, workers are guaranteed to be reused across streams A and B.
+    const pool = createGulpWorkerPool({ workerPath: dummyWorkerPath, concurrency: 2 });
+
+    const streamA = pool({ workerOptions: { suffix: '-A' } });
+    const streamB = pool({ workerOptions: { suffix: '-B' } });
+
+    const filesA = [
+      new MockFile({ contents: Buffer.from('A1'), path: '/a1.less' }),
+      new MockFile({ contents: Buffer.from('A2'), path: '/a2.less' }),
+      new MockFile({ contents: Buffer.from('A3'), path: '/a3.less' }),
+    ];
+    const filesB = [
+      new MockFile({ contents: Buffer.from('B1'), path: '/b1.less' }),
+      new MockFile({ contents: Buffer.from('B2'), path: '/b2.less' }),
+      new MockFile({ contents: Buffer.from('B3'), path: '/b3.less' }),
+    ];
+
+    // Kick off both streams without awaiting either first, so their tasks
+    // genuinely interleave across the same 2 workers (dummy-worker.js's 10ms
+    // artificial delay widens the overlap window).
+    const [outA, outB] = await Promise.all([
+      runStream(streamA, filesA),
+      runStream(streamB, filesB),
+    ]);
+
+    expect(outA).toHaveLength(3);
+    expect(outB).toHaveLength(3);
+    for (const file of outA) expect(file.contents?.toString()).toMatch(/-A$/);
+    for (const file of outB) expect(file.contents?.toString()).toMatch(/-B$/);
+  });
+
+  it('16. Ignores a stray, non-task-shaped message posted directly on parentPort by user code', async () => {
+    const strayWorkerPath = path.resolve(import.meta.dirname, 'dummy-stray-message-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: strayWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [
+      new MockFile({ contents: Buffer.from('X'), path: '/x.less' }),
+      new MockFile({ contents: Buffer.from('Y'), path: '/y.less' }),
+    ];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(2);
+    const results = out.map(f => f.contents?.toString()).sort();
+    expect(results).toEqual(['X-DONE', 'Y-DONE']);
+  });
+
+  it('17. Ignores a stray message even when it reuses `result` as a property name', async () => {
+    const strayWorkerPath = path.resolve(import.meta.dirname, 'dummy-stray-result-key-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: strayWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [
+      new MockFile({ contents: Buffer.from('X'), path: '/x.less' }),
+      new MockFile({ contents: Buffer.from('Y'), path: '/y.less' }),
+    ];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(2);
+    const results = out.map(f => f.contents?.toString()).sort();
+    expect(results).toEqual(['X-DONE', 'Y-DONE']);
+  });
+
+  it('18. Normalizes a non-Uint8Array typed-array result (Uint16Array) instead of stringifying it', async () => {
+    const typedArrayWorkerPath = path.resolve(import.meta.dirname, 'dummy-typed-array-worker.js');
+    const pool = createGulpWorkerPool({ workerPath: typedArrayWorkerPath, concurrency: 1 });
+    const stream = pool();
+    const files = [new MockFile({ contents: Buffer.from('irrelevant'), path: '/t.bin' })];
+
+    const out = await runStream(stream, files);
+    expect(out).toHaveLength(1);
+    const expected = Buffer.from(new Uint16Array([0x0041, 0x00FF, 0x1234]).buffer);
+    expect(out[0].contents).toEqual(expected);
+    expect(out[0].extname).toBe('.bin');
+  });
+
+  it('19. A busy worker\'s cache clobbered by an overlapping stream\'s init broadcast still gets resynced', async () => {
+    // Regression test: the init broadcast alone updates a worker's cached
+    // workerOptions (cacheWorkerOptions in worker.ts) regardless of whether
+    // that worker is busy -- so lastOptions bookkeeping must be invalidated by
+    // the broadcast itself, not just by task dispatch. With a single worker,
+    // this isolates the scenario: task A1 dispatched (worker busy) -> while
+    // busy, stream B is created (broadcasting init(B) to the SAME worker,
+    // clobbering its cache) but given NO files yet, so it can't itself
+    // dispatch a task that would incidentally fix up lastOptions -> stream A's
+    // task A2 is the ONLY thing dispatched next. Without invalidating
+    // lastOptions on the broadcast, A2 would wrongly skip re-sending stream
+    // A's options once the worker frees up.
+    const pool = createGulpWorkerPool({ workerPath: dummyWorkerPath, concurrency: 1 });
+
+    const streamA = pool({ workerOptions: { suffix: '-A' } });
+    const resultsA: MockFile[] = [];
+    streamA.on('data', (f: MockFile) => resultsA.push(f));
+    const doneA = new Promise((resolve, reject) => {
+      streamA.on('end', resolve);
+      streamA.on('error', reject);
+    });
+
+    // Dispatches immediately: the only worker is idle.
+    streamA.write(new MockFile({ contents: Buffer.from('A1'), path: '/a1.less' }));
+
+    // While A1 is still in flight (10ms delay in dummy-worker.js), start an
+    // overlapping stream B: its init broadcast lands on the SAME (busy)
+    // worker and clobbers its cached workerOptions. No file is written to it
+    // yet, so it cannot dispatch a task of its own in between.
+    const streamB = pool({ workerOptions: { suffix: '-B' } });
+
+    streamA.write(new MockFile({ contents: Buffer.from('A2'), path: '/a2.less' }));
+    streamA.end();
+    await doneA;
+
+    expect(resultsA).toHaveLength(2);
+    for (const file of resultsA) expect(file.contents?.toString()).toMatch(/-A$/);
+
+    // Close out stream B cleanly.
+    const resultsB: MockFile[] = [];
+    streamB.on('data', (f: MockFile) => resultsB.push(f));
+    const doneB = new Promise((resolve, reject) => {
+      streamB.on('end', resolve);
+      streamB.on('error', reject);
+    });
+    streamB.write(new MockFile({ contents: Buffer.from('B1'), path: '/b1.less' }));
+    streamB.end();
+    await doneB;
+    expect(resultsB).toHaveLength(1);
+    expect(resultsB[0].contents?.toString()).toMatch(/-B$/);
+  });
 });

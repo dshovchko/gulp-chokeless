@@ -49,8 +49,14 @@ export type StatsReporter = (stats: PoolStats) => void;
 
 interface WorkerInfo {
   worker: Worker;
-  busy: boolean;
-  callbacks: Map<number, TaskCallback>;
+  /** Fixed slot index into {@link GulpChokelessPool.workers}; stable across replacements. */
+  index: number;
+  /**
+   * Callback for the single task currently dispatched to this worker, or
+   * `null` when idle. The pool serializes one task per worker, so a single
+   * slot suffices — responses are routed by worker instance, not by task id.
+   */
+  callback: TaskCallback | null;
   /**
    * Cumulative count of tasks completed by this worker slot (spawn index). The
    * counter is carried across worker replacements (see
@@ -58,6 +64,15 @@ interface WorkerInfo {
    * counting work done before a mid-stream crash.
    */
   tasksProcessed: number;
+  /**
+   * Reference to the options object last attached to a task message actually
+   * dispatched to this worker (not the broadcast `init` message, which may
+   * race an overlapping stream's tasks on a busy worker). Options are only
+   * re-sent with a task when this differs from the task's own options object,
+   * so the pool never has to trust which stream's `init` last "won" the race
+   * on a shared worker — correctness follows real dispatch order instead.
+   */
+  lastOptions?: any;
 }
 
 /**
@@ -90,8 +105,13 @@ class GulpWorkerError extends Error {
  */
 export class GulpChokelessPool {
   private workers: WorkerInfo[] = [];
+  /**
+   * Stack of indices into {@link workers} that are currently idle. Dispatch
+   * pops an index (O(1)); completion pushes it back. Replaces the previous
+   * `workers.find(w => !w.busy)` O(N) scan and its low-index dispatch skew.
+   */
+  private freeWorkers: number[] = [];
   private taskQueue = new FastQueue<any>();
-  private workerIdCounter = 0;
   private activeStreams = 0;
   private poolConcurrency: number;
   private baseOptions: any;
@@ -116,7 +136,9 @@ export class GulpChokelessPool {
 
     // Calculate or reuse connection pool size
     for (let i = 0; i < this.poolConcurrency; i++) {
-      this.workers.push(this.createWorker());
+      const workerInfo = this.createWorker(i);
+      this.workers.push(workerInfo);
+      this.freeWorkers.push(i);
     }
 
     // Pre-initialize workers immediately upon task creation (AST and JIT caching benefits)
@@ -143,14 +165,30 @@ export class GulpChokelessPool {
     cb(new GulpWorkerError(err));
   }
 
-  private createWorker(): WorkerInfo {
+  /**
+   * A legitimate task response always carries `result` as an `ArrayBuffer`
+   * (success, incl. an empty one) or `error` as an object with a string
+   * `message` (failure) -- the exact shapes worker.ts ever sends. User
+   * process() code shares the same worker thread and can reach `parentPort`
+   * directly (e.g. a library posting its own progress/debug messages);
+   * validating the shape (not just key presence) guards against a stray
+   * message that happens to reuse `result`/`error` as a property name too,
+   * which would otherwise resolve/reject the wrong call and desync the slot
+   * from the real response that follows.
+   */
+  private isTaskResponse(data: any): boolean {
+    if (data === null || data === undefined) return false;
+    return (data.result instanceof ArrayBuffer) || (!!data.error && typeof data.error.message === 'string');
+  }
+
+  private createWorker(index: number): WorkerInfo {
     const worker = new Worker(path.join(__dirname, 'worker.js'));
     worker.unref();
 
     const workerInfo: WorkerInfo = {
       worker,
-      busy: false,
-      callbacks: new Map(),
+      index,
+      callback: null,
       tasksProcessed: 0
     };
 
@@ -160,33 +198,38 @@ export class GulpChokelessPool {
         return;
       }
 
-      const {id, error, result, imports, sourcemap, extname} = data;
-      const cb = workerInfo.callbacks.get(id);
+      if (!this.isTaskResponse(data)) return;
+
+      // Responses are routed by worker instance: the pool dispatches at most one
+      // task per worker, so this slot's pending callback is the right target.
+      const cb = workerInfo.callback;
       if (cb) {
-        workerInfo.callbacks.delete(id);
-        workerInfo.busy = false;
+        workerInfo.callback = null;
+        this.freeWorkers.push(workerInfo.index);
         // Only track per-slot task counts when stats are enabled, so the
         // default hot path stays untouched.
         if (this.statsReporter) workerInfo.tasksProcessed++;
-        cb(error, {result, imports, sourcemap, extname});
+        cb(data.error, {result: data.result, imports: data.imports, sourcemap: data.sourcemap, extname: data.extname});
         this.processNextTask();
       }
     });
 
     worker.on('error', (err: Error) => {
-      for (const [, cb] of workerInfo.callbacks.entries()) cb(err, null);
-      workerInfo.callbacks.clear();
+      const cb = workerInfo.callback;
+      if (cb) {
+        workerInfo.callback = null;
+        cb(err, null);
+      }
       this.replaceDeadWorker(workerInfo);
     });
 
     worker.on('exit', (code) => {
-      const hadPendingCallbacks = workerInfo.callbacks.size > 0;
-      if (hadPendingCallbacks) {
-        for (const [, cb] of workerInfo.callbacks.entries()) cb(new Error(`Worker stopped with exit code ${code}`), null);
-        workerInfo.callbacks.clear();
-        workerInfo.busy = false;
+      const cb = workerInfo.callback;
+      if (cb) {
+        workerInfo.callback = null;
+        cb(new Error(`Worker stopped with exit code ${code}`), null);
       }
-      if (code !== 0 || hadPendingCallbacks) {
+      if (code !== 0 || cb) {
         this.replaceDeadWorker(workerInfo);
       }
     });
@@ -254,56 +297,71 @@ export class GulpChokelessPool {
   }
 
   private replaceDeadWorker(deadWorkerInfo: WorkerInfo): void {
-    const idx = this.workers.indexOf(deadWorkerInfo);
-    if (idx !== -1) {
-      const replacement = this.createWorker();
-      // Preserve the slot's cumulative task count so per-stream deltas still
-      // include work the dead worker completed earlier in the same stream.
-      replacement.tasksProcessed = deadWorkerInfo.tasksProcessed;
-      this.workers[idx] = replacement;
-      // While a stream is active, match the replacement to the rest of the pool
-      // by reusing the most recent per-stream init options (cache reset,
-      // per-stream config); otherwise fall back to the pool's base options.
-      const initOptions = this.activeStreams > 0 && this.lastInitOptions
-        ? this.lastInitOptions
-        : this.baseOptions;
-      replacement.worker.postMessage({type: 'init', options: initOptions});
-      if (this.activeStreams > 0) replacement.worker.ref();
-      // ELU is per worker instance and the dead worker's is unrecoverable, so
-      // re-baseline only utilization for active sessions. The task baseline is
-      // left intact so completed-task deltas remain accurate.
-      for (const session of this.activeSessions) {
-        session.eluBaselines[idx] = replacement.worker.performance.eventLoopUtilization();
-      }
-      this.processNextTask();
+    const idx = deadWorkerInfo.index;
+    if (this.workers[idx] !== deadWorkerInfo) return;
+
+    const replacement = this.createWorker(idx);
+    // Preserve the slot's cumulative task count so per-stream deltas still
+    // include work the dead worker completed earlier in the same stream.
+    replacement.tasksProcessed = deadWorkerInfo.tasksProcessed;
+    this.workers[idx] = replacement;
+
+    // The slot is idle again: ensure its index appears exactly once in the
+    // free stack (a worker that crashed while idle was already listed).
+    // Cold path (worker replacement only): filter to fully de-dup rather than
+    // removing a single occurrence, in case duplicate signals ever queue it twice.
+    this.freeWorkers = this.freeWorkers.filter((i) => i !== idx);
+    this.freeWorkers.push(idx);
+
+    // While a stream is active, match the replacement to the rest of the pool
+    // by reusing the most recent per-stream init options (cache reset,
+    // per-stream config); otherwise fall back to the pool's base options.
+    const initOptions = this.activeStreams > 0 && this.lastInitOptions
+      ? this.lastInitOptions
+      : this.baseOptions;
+    replacement.worker.postMessage({type: 'init', options: initOptions});
+    if (this.activeStreams > 0) replacement.worker.ref();
+    // ELU is per worker instance and the dead worker's is unrecoverable, so
+    // re-baseline only utilization for active sessions. The task baseline is
+    // left intact so completed-task deltas remain accurate.
+    for (const session of this.activeSessions) {
+      session.eluBaselines[idx] = replacement.worker.performance.eventLoopUtilization();
     }
+    this.processNextTask();
   }
 
   private processNextTask(): void {
-    while (this.taskQueue.length > 0) {
-      const idleWorker = this.workers.find((w) => !w.busy);
-      if (!idleWorker) break;
-
+    while (this.taskQueue.length > 0 && this.freeWorkers.length > 0) {
+      const idx = this.freeWorkers.pop()!;
       const task = this.taskQueue.shift();
-      this.executeTask(idleWorker, task);
+      this.executeTask(this.workers[idx], task);
     }
   }
 
   private executeTask(workerInfo: WorkerInfo, task: {sab: SharedArrayBuffer, filename: string, sourceMap: boolean, options: any, cb: TaskCallback}): void {
-    const id = ++this.workerIdCounter;
-    workerInfo.busy = true;
-    workerInfo.callbacks.set(id, task.cb);
+    workerInfo.callback = task.cb;
     try {
-      workerInfo.worker.postMessage({
+      const msg: any = {
         sab: task.sab,
         filename: task.filename,
-        sourceMap: task.sourceMap,
-        options: task.options,
-        id
-      });
+        sourceMap: task.sourceMap
+      };
+      // Only attach (and thus clone across the thread boundary) options when
+      // they differ from what this specific worker was last dispatched: two
+      // overlapping streams (e.g. gulp.parallel) with different workerOptions
+      // can share this pool, and a worker may alternate between their tasks in
+      // whatever order the main thread actually dispatches them. Comparing by
+      // reference here — tied to real dispatch order — is what keeps that
+      // correct; the eager `init` broadcast alone cannot, since it fires
+      // regardless of whether a targeted worker is currently busy with
+      // another stream's task.
+      if (workerInfo.lastOptions !== task.options) {
+        msg.options = task.options;
+        workerInfo.lastOptions = task.options;
+      }
+      workerInfo.worker.postMessage(msg);
     } catch (err: any) {
-      workerInfo.callbacks.delete(id);
-      workerInfo.busy = false;
+      workerInfo.callback = null;
 
       // Re-queue the task so it gets picked up immediately by the replacement.
       this.taskQueue.unshift(task);
@@ -327,9 +385,9 @@ export class GulpChokelessPool {
         }
       };
 
-      const worker = this.workers.find((w) => !w.busy);
-      if (worker) {
-        this.executeTask(worker, task);
+      const idx = this.freeWorkers.pop();
+      if (idx !== undefined) {
+        this.executeTask(this.workers[idx], task);
       } else {
         this.taskQueue.push(task);
       }
@@ -357,26 +415,50 @@ export class GulpChokelessPool {
     }
   }
 
+  /**
+   * Builds this stream's effective options, remembers them for mid-stream
+   * worker replacement, and broadcasts an `init` to every worker (refreshing
+   * caches / running the user's `init()` hook -- useful for watch mode).
+   *
+   * The broadcast unconditionally updates EVERY worker's cached
+   * `workerOptions` (see `cacheWorkerOptions` in worker.ts), including workers
+   * currently busy with another overlapping stream's task -- so this also
+   * invalidates {@link WorkerInfo.lastOptions} pool-wide. Without that, a busy
+   * worker's NEXT task from an unrelated, still-in-flight stream could wrongly
+   * skip re-sending its own options (lastOptions would still reference-match
+   * that task's options even though this broadcast already clobbered what the
+   * worker actually has cached), running with the wrong workerOptions.
+   * @param streamOptions - Per-stream overrides passed to the plugin factory.
+   * @returns The merged, effective options for this stream.
+   */
+  private prepareStreamOptions(streamOptions: any): any {
+    const currentOptions = Object.assign({
+      workerOptions: {},
+      sourcemap: false
+    }, this.baseOptions, streamOptions);
+
+    // Lock workerPath to the originally pre-warmed module, ignoring any stream overrides
+    currentOptions.workerPath = this.baseOptions.workerPath;
+
+    // onStats is a pool-only callback; strip it so a stray per-stream override
+    // never reaches postMessage (a function would throw DataCloneError).
+    delete currentOptions.onStats;
+
+    // Remember these options so a worker replaced mid-stream is initialized
+    // to the same state as the rest of the pool.
+    this.lastInitOptions = currentOptions;
+
+    this.workers.forEach((w) => {
+      w.lastOptions = undefined;
+      w.worker.postMessage({type: 'init', options: currentOptions});
+    });
+
+    return currentOptions;
+  }
+
   public getPlugin(): (streamOptions?: any) => ConcurrentTransform {
     return (streamOptions: any = {}): ConcurrentTransform => {
-      const currentOptions = Object.assign({
-        workerOptions: {},
-        sourcemap: false
-      }, this.baseOptions, streamOptions);
-
-      // Lock workerPath to the originally pre-warmed module, ignoring any stream overrides
-      currentOptions.workerPath = this.baseOptions.workerPath;
-
-      // onStats is a pool-only callback; strip it so a stray per-stream override
-      // never reaches postMessage (a function would throw DataCloneError).
-      delete currentOptions.onStats;
-
-      // Remember these options so a worker replaced mid-stream is initialized
-      // to the same state as the rest of the pool.
-      this.lastInitOptions = currentOptions;
-
-      // Ensure workers reset their caches and receive the latest options per stream (useful for watch mode)
-      this.workers.forEach((w) => w.worker.postMessage({type: 'init', options: currentOptions}));
+      const currentOptions = this.prepareStreamOptions(streamOptions);
 
       this.beginStream();
       const session = this.startStatsSession();

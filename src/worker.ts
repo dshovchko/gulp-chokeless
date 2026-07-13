@@ -4,6 +4,51 @@ import {pathToFileURL} from 'url';
 let currentHandler: any = null;
 let initPromise: Promise<any> | null = null;
 let lastWorkerPath: string | null = null;
+// Cached per-stream worker options (set on init) so each task message need not
+// re-clone the (potentially large) options object across the worker boundary.
+let currentWorkerOptions: any = {};
+
+// Reused across every task: stateless codecs are safe to share and avoid a
+// per-file allocation on the worker hot path.
+const decoder = new TextDecoder('utf-8');
+const encoder = new TextEncoder();
+
+/**
+ * Recursively freezes an object graph so cached, cross-task-shared state
+ * (currently {@link currentWorkerOptions}) can't be mutated by a processor.
+ * `seen` is purely a cycle guard (not a "skip already-frozen" check): a child
+ * object can arrive already frozen by the caller while its own children are
+ * still mutable, so recursion must continue regardless of the parent's frozen
+ * state -- only re-visiting the same object is skipped.
+ *
+ * Scope: `Object.freeze` blocks reassigning/adding/deleting a plain object's
+ * OWN properties, which covers the plain config objects/arrays `workerOptions`
+ * is expected to be built from (see the README example: `less`/`lightningcss`/
+ * `banner` config trees). It does NOT stop internal-slot mutation on exotic
+ * built-ins a processor might embed in there instead (e.g. `Map#set`,
+ * `Set#add`, `Date#setFullYear`, or writing to a `Buffer`/typed-array index) --
+ * those bypass ordinary property writes entirely, so freezing can't intercept
+ * them. Deliberately not cloning per task to close that narrower gap: doing so
+ * would reintroduce the full per-file clone cost this caching was added to
+ * eliminate (see the workerOptions-caching perf changes), for a shape of
+ * config this library doesn't otherwise expect.
+ * @param value - The value to freeze in place.
+ * @param seen - Objects already visited in this call tree (cycle guard).
+ */
+function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
+  if (value === null || typeof value !== 'object') return value;
+  const obj = value as unknown as object;
+  if (seen.has(obj)) return value;
+  seen.add(obj);
+  if (!Object.isFrozen(obj)) Object.freeze(obj);
+  for (const key of Reflect.ownKeys(obj)) {
+    const child = (obj as any)[key];
+    if (child !== null && typeof child === 'object') {
+      deepFreeze(child, seen);
+    }
+  }
+  return value;
+}
 
 /**
  * Loads a specified user-provided processor module dynamically.
@@ -19,12 +64,28 @@ async function getHandler(processorPath: string): Promise<any> {
 }
 
 /**
- * Re-reads worker options, invokes user-defined initializations or cache warm-ups,
- * and delegates success/failure directly to the parent stream orchestrator via port messaging.
- * @param message - Initialization payload dispatched from the `GulpChokelessPool`.
+ * Deep-freezes and caches `workerOptions` as {@link currentWorkerOptions}, used
+ * by both the `init` broadcast and a per-task resync (see {@link handleTaskMessage}).
+ * @param opts - The options payload (`{workerPath, workerOptions, ...}`) to cache from.
  */
+function cacheWorkerOptions(opts: any): void {
+  // Deep-frozen (cycle-safe) since it's reused across every task that shares
+  // this reference: a per-task clone used to stop a processor's mutation
+  // (incl. nested objects) from leaking into later files; freezing the whole
+  // graph preserves that guarantee for the cached object.
+  currentWorkerOptions = deepFreeze(opts.workerOptions || {});
+}
+
 function handleInitMessage(message: any): void {
   const opts = message.options || {};
+
+  // Cache workerOptions here (per stream / per watch reconfig) so the task hot
+  // path can read them locally instead of the main thread cloning them on
+  // every postMessage. This also runs the user's init() hook pool-wide per
+  // stream; the pool separately resyncs a task's own options if a DIFFERENT
+  // stream's task lands on this worker in between (see handleTaskMessage), so
+  // this broadcast racing an overlapping stream cannot misapply options.
+  cacheWorkerOptions(opts);
 
   if (opts.workerPath && opts.workerPath !== lastWorkerPath) {
     lastWorkerPath = opts.workerPath;
@@ -71,16 +132,83 @@ function handleInitMessage(message: any): void {
   }
 }
 
-function processTaskResult(res: any, id: number, sourceMap: boolean): void {
+/**
+ * Converts a processor's result into bytes safe to transfer to the main
+ * thread. Strings are encoded once (always producing a freshly-allocated,
+ * exact-sized buffer, safe to transfer). Binary results (`Buffer`/`Uint8Array`/
+ * `ArrayBuffer`) are passed through zero-copy when the view owns its entire
+ * backing buffer; a view into a larger/shared buffer (e.g. a `Buffer` slice
+ * from Node's shared allocation pool) is copied first, since transferring the
+ * whole backing buffer would detach memory other data may still be using.
+ * @param value - The raw result value returned by the user's `process()`.
+ */
+function toTransferableBytes(value: any): Uint8Array {
+  if (typeof value === 'string') return encoder.encode(value);
+  // Normalize any other ArrayBufferView (Uint16Array, Int32Array, DataView,
+  // Uint8ClampedArray, ...) to a Uint8Array over the SAME bytes (a view, not a
+  // copy) so it's handled as binary below instead of falling through to
+  // String(value) and getting UTF-8 encoded -- structured clone used to carry
+  // these correctly pre-H5; this restores that for the zero-copy path too.
+  if (ArrayBuffer.isView(value) && !(value instanceof Uint8Array)) {
+    value = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof Uint8Array) {
+    // A SharedArrayBuffer-backed view must always be copied: returning it
+    // as-is would let the main thread's Buffer.from wrap shared memory
+    // instead of a private copy, and it also isn't Transferable.
+    const isShared = typeof SharedArrayBuffer !== 'undefined' && value.buffer instanceof SharedArrayBuffer;
+    if (!isShared && value.byteOffset === 0 && value.byteLength === value.buffer.byteLength) {
+      return value;
+    }
+    // Note: Buffer (a Uint8Array subclass) overrides .slice() to return a
+    // VIEW into the same backing buffer instead of copying, so call the base
+    // Uint8Array.prototype.slice explicitly to guarantee an independent,
+    // exact-sized copy here (always ArrayBuffer-backed, even when the source
+    // view is backed by a SharedArrayBuffer).
+    return Uint8Array.prototype.slice.call(value);
+  }
+  if (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer) {
+    // A raw SharedArrayBuffer result (not wrapped in a Uint8Array) must also
+    // be copied into a private ArrayBuffer: it isn't Transferable, and
+    // wrapping it as-is on the main thread would share memory instead of
+    // returning a private copy.
+    return new Uint8Array(value).slice();
+  }
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return encoder.encode(String(value ?? ''));
+}
+
+/**
+ * Posts a message whose payload bytes live in `bytes.buffer`, transferring
+ * that buffer (zero-copy) only when it is a real `ArrayBuffer`. Belt-and-
+ * suspenders: {@link toTransferableBytes} already guarantees an ArrayBuffer-
+ * backed result, but if it were ever handed a SharedArrayBuffer directly this
+ * still falls back to a normal (copying) postMessage instead of throwing.
+ */
+function postWithBytes(obj: any, bytes: Uint8Array): void {
+  const buffer = bytes.buffer;
+  if (buffer instanceof ArrayBuffer) {
+    parentPort!.postMessage(obj, [buffer]);
+  } else {
+    parentPort!.postMessage(obj);
+  }
+}
+
+function processTaskResult(res: any, sourceMap: boolean): void {
   if (!res) {
-    parentPort!.postMessage({id, result: '', imports: []});
+    const empty = new Uint8Array(0);
+    postWithBytes({result: empty.buffer, imports: []}, empty);
     return;
   }
 
-  const resultString = res.result || res.css || res.code || (typeof res === 'string' ? res : '');
+  const rawResult = res.result || res.css || res.code || (typeof res === 'string' ? res : '');
+  // Encode/normalize the result once and transfer its exact-sized backing
+  // buffer to the main thread (zero-copy): the parent wraps it with
+  // Buffer.from, sharing the memory instead of re-serializing through
+  // structured clone.
+  const bytes = toTransferableBytes(rawResult);
   const obj: any = {
-    id,
-    result: resultString,
+    result: bytes.buffer,
     imports: res.imports || []
   };
 
@@ -92,11 +220,18 @@ function processTaskResult(res: any, id: number, sourceMap: boolean): void {
     obj.sourcemap = typeof res.map === 'string' ? JSON.parse(res.map) : res.map;
   }
 
-  parentPort!.postMessage(obj);
+  postWithBytes(obj, bytes);
 }
 
 async function handleTaskMessage(message: any): Promise<void> {
-  const {sab, filename, sourceMap, options, id} = message;
+  const {sab, filename, sourceMap, options} = message;
+
+  // The pool only attaches `options` when they differ from what it last sent
+  // THIS worker (see GulpChokelessPool.executeTask): this is what keeps two
+  // overlapping streams (e.g. gulp.parallel) with different workerOptions
+  // correct even though they may share this worker over time — resyncing here,
+  // tied to this exact task, cannot race an unrelated stream's init broadcast.
+  if (options) cacheWorkerOptions(options);
 
   if (initPromise) {
     try {
@@ -106,24 +241,22 @@ async function handleTaskMessage(message: any): Promise<void> {
         error: {
           message: `Worker initialization failed: ${err.message || err.toString()}`,
           filename
-        },
-        id
+        }
       });
     }
   }
 
   const view = new Uint8Array(sab);
-  const decoder = new TextDecoder('utf-8');
   const str = decoder.decode(view);
 
   if (!currentHandler) {
-    return parentPort!.postMessage({error: {message: 'No workerPath defined', filename}, id});
+    return parentPort!.postMessage({error: {message: 'No workerPath defined', filename}});
   }
 
   try {
     const fn = (typeof currentHandler.process === 'function') ? currentHandler.process : currentHandler;
-    const res = await fn(str, filename, sourceMap, options.workerOptions || {});
-    processTaskResult(res, id, sourceMap);
+    const res = await fn(str, filename, sourceMap, currentWorkerOptions);
+    processTaskResult(res, sourceMap);
   } catch (err: any) {
     parentPort!.postMessage({
       error: {
@@ -131,8 +264,7 @@ async function handleTaskMessage(message: any): Promise<void> {
         line: err.line,
         filename: err.filename || filename,
         extract: err.extract
-      },
-      id
+      }
     });
   }
 }
@@ -151,8 +283,7 @@ if (parentPort) {
             line: err?.line,
             filename: err?.filename || message?.filename,
             extract: err?.extract
-          },
-          id: message?.id
+          }
         });
       });
     }
